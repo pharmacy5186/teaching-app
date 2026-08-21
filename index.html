@@ -358,8 +358,8 @@ table.sched-table td{padding:8px 4px;border-bottom:1px solid var(--line);}
 }
 .login-id-input{
   flex:1 1 0%;min-width:0;width:100%;border:2px solid var(--primary);border-radius:var(--radius-md);
-  font-family:var(--font-mono);font-size:26px;letter-spacing:.12em;text-align:center;color:var(--ink);
-  background:#fff;padding:0 6px;
+  font-family:var(--font-mono);font-size:26px;letter-spacing:.12em;text-align:left;color:var(--ink);
+  background:#fff;padding:0 14px;
 }
 .login-id-input::placeholder{color:var(--line);}
 .login-name-box{
@@ -2621,7 +2621,8 @@ function openItemModal(stationId, itemId){
   const sections = migrateDetailToSections(d);
   const sectionsHtml = sections.map(s=>`
     ${s.title ? `<div class="modal-summary">⚠ ${s.title}</div>` : ''}
-    ${s.text ? `<p style="font-size:13px;line-height:1.7;color:var(--ink);white-space:pre-line;margin:0 0 14px;">${s.text}</p>` : ''}
+    ${s.text ? `<p style="font-size:13px;line-height:1.7;color:var(--ink);white-space:pre-line;margin:0 0 10px;">${s.text}</p>` : ''}
+    ${renderViewerAttachments(s.attachments)}
   `).join('');
   openModal(`
     <div class="modal-top">
@@ -2868,9 +2869,9 @@ async function deleteItem(stId, catId, itemId){
 }
 function migrateDetailToSections(d){
   if(!d) return [];
-  if(d.sections && d.sections.length) return d.sections.map(s=>({title:s.title||'', text:s.text||''}));
+  if(d.sections && d.sections.length) return d.sections.map(s=>({title:s.title||'', text:s.text||'', attachments:s.attachments||[]}));
   const legacyText = (d.steps||[]).join('\n');
-  if(d.summary || legacyText) return [{title:d.summary||'', text:legacyText}];
+  if(d.summary || legacyText) return [{title:d.summary||'', text:legacyText, attachments:[]}];
   return [];
 }
 function renderItemSectionsEditor(sections, stId, catId, itemId){
@@ -2882,13 +2883,21 @@ function renderItemSectionsEditor(sections, stId, catId, itemId){
         <button type="button" class="mini-x" onclick="removeItemSectionAt('${stId}','${catId}','${itemId}',${i})">✕ 刪除</button>
       </div>
       <div class="form-group" style="margin-bottom:6px;"><label>標題（紅字顯示）</label><input type="text" class="section-title-input" data-idx="${i}" value="${s.title||''}"></div>
-      <div class="form-group" style="margin-bottom:0;"><label>說明內容</label><textarea class="section-text-input" data-idx="${i}">${s.text||''}</textarea></div>
+      <div class="form-group" style="margin-bottom:8px;"><label>說明內容</label><textarea class="section-text-input" data-idx="${i}">${s.text||''}</textarea></div>
+      <div class="subhead" style="margin:8px 0 6px;font-size:11px;">此項附件（圖片／PDF／Word）</div>
+      ${renderAdminAttachmentChips(s.attachments, `removeSectionAttachment('${stId}','${catId}','${itemId}',${i},`)}
+      <input type="file" id="section-att-input-${i}" accept="image/*,.pdf,.doc,.docx" multiple style="width:100%;margin-bottom:6px;">
+      <button type="button" class="btn btn-ghost btn-sm btn-block" onclick="uploadSectionAttachments('${stId}','${catId}','${itemId}',${i})">上傳此項附件</button>
     </div>`).join('');
 }
 function readSectionsFromModal(){
   const titles = Array.from(document.querySelectorAll('.section-title-input'));
   const texts = Array.from(document.querySelectorAll('.section-text-input'));
-  return titles.map((t,i)=>({title:t.value.trim(), text:(texts[i]?texts[i].value.trim():'')})).filter(s=>s.title || s.text);
+  return titles.map((t,i)=>({
+    title: t.value.trim(),
+    text: (texts[i]?texts[i].value.trim():''),
+    attachments: (editingItemSections[i] && editingItemSections[i].attachments) || []
+  })).filter(s=>s.title || s.text || (s.attachments && s.attachments.length));
 }
 
 let editingItemSections = [];
@@ -2908,8 +2917,8 @@ function editItem(stId, catId, itemId, sectionsOverride){
       <div class="subhead" style="margin-top:0;">提醒事項</div>
       <div id="item-sections-container">${renderItemSectionsEditor(editingItemSections, stId, catId, itemId)}</div>
       <button type="button" class="btn btn-outline btn-block" style="margin-bottom:14px;" onclick="addItemSection('${stId}','${catId}','${itemId}')">＋ 新增提醒事項</button>
-      <div class="form-group"><label>圖片網址（選填，也可用下方上傳檔案）</label><input type="text" id="edit-item-image" value="${d.image||''}"></div>
-      <div class="subhead" style="margin-top:6px;">教材附件（圖片／PDF／Word）</div>
+      <div class="form-group"><label>圖片網址（選填，此為整個項目共用，也可用上方各提醒事項自己的附件）</label><input type="text" id="edit-item-image" value="${d.image||''}"></div>
+      <div class="subhead" style="margin-top:6px;">整個項目共用的教材附件（圖片／PDF／Word）</div>
       ${renderAdminAttachmentChips(d.attachments, `removeItemAttachment('${stId}','${catId}','${itemId}',`)}
       <input type="file" id="item-att-input" accept="image/*,.pdf,.doc,.docx" multiple style="width:100%;margin-bottom:6px;">
       <p style="font-size:11px;color:var(--ink-soft);margin:0 0 8px;">單檔建議 3.5MB 以內；Word（.docx）會自動轉換為可預覽內容。</p>
@@ -2920,12 +2929,34 @@ function editItem(stId, catId, itemId, sectionsOverride){
 }
 function addItemSection(stId, catId, itemId){
   const current = readSectionsFromModal();
-  current.push({title:'', text:''});
+  current.push({title:'', text:'', attachments:[]});
   editItem(stId, catId, itemId, current);
 }
 function removeItemSectionAt(stId, catId, itemId, idx){
   const current = readSectionsFromModal();
   current.splice(idx,1);
+  editItem(stId, catId, itemId, current);
+}
+async function uploadSectionAttachments(stId, catId, itemId, sectionIdx){
+  const input = document.getElementById('section-att-input-'+sectionIdx);
+  const files = Array.from((input && input.files) || []);
+  if(!files.length){ showToast('請先選擇檔案'); return; }
+  const current = readSectionsFromModal();
+  if(!current[sectionIdx]){ showToast('請先填寫此提醒事項的標題或說明再上傳'); return; }
+  const newAtts = [];
+  for(const file of files){
+    if(file.size > MAX_ATTACHMENT_BYTES){ showToast(`${file.name} 超過 ${humanFileSize(MAX_ATTACHMENT_BYTES)}，已略過`); continue; }
+    try{ newAtts.push(await processUploadedFile(file)); }
+    catch(e){ console.error(e); showToast(`${file.name} 無法處理，已略過`); }
+  }
+  current[sectionIdx].attachments = (current[sectionIdx].attachments||[]).concat(newAtts);
+  editItem(stId, catId, itemId, current);
+  showToast(`已上傳 ${newAtts.length} 個檔案`);
+}
+async function removeSectionAttachment(stId, catId, itemId, sectionIdx, attId){
+  const current = readSectionsFromModal();
+  if(!current[sectionIdx]) return;
+  current[sectionIdx].attachments = (current[sectionIdx].attachments||[]).filter(a=>a.id!==attId);
   editItem(stId, catId, itemId, current);
 }
 function captureItemModalFields(){
@@ -3087,7 +3118,7 @@ function renderLogin(){
         <label class="login-field-label">員工編號</label>
         <div class="login-id-row">
           <span class="login-y-badge">Y</span>
-          <input type="tel" inputmode="numeric" pattern="[0-9]*" maxlength="5" id="login-empno" class="login-id-input" placeholder="00000" oninput="onLoginIdInput()" onkeydown="if(event.key==='Enter')doLogin()" autofocus>
+          <input type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" autocorrect="off" spellcheck="false" maxlength="5" id="login-empno" class="login-id-input" placeholder="00000" oninput="onLoginIdInput()" onkeydown="if(event.key==='Enter')doLogin()" autofocus>
         </div>
 
         <label class="login-field-label" style="margin-top:16px;">員工姓名（自動帶入）</label>
@@ -3105,7 +3136,8 @@ function lookupByDigits(digits){
 }
 function onLoginIdInput(){
   const input = document.getElementById('login-empno');
-  input.value = input.value.replace(/[^0-9]/g,'').slice(0,5);
+  const cleaned = input.value.replace(/[^0-9]/g,'').slice(0,5);
+  if(input.value !== cleaned) input.value = cleaned;
   const box = document.getElementById('login-name-preview');
   const digits = input.value;
   if(!digits){
