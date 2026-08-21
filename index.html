@@ -494,6 +494,16 @@ function weekdayZh(dateStr){
   return '星期'+w[d.getDay()];
 }
 function uid(prefix){return prefix+'_'+Math.random().toString(36).slice(2,9);}
+// 把資料值安全地放進 HTML 屬性（例如 value="..."）用的跳脫函式。
+// 沒有這層跳脫的話，只要內容裡有雙引號，value="${text}" 這種寫法就會在雙引號處被硬生生截斷，
+// 後台編輯畫面看起來像是資料不見了，但實際存檔的資料其實沒事（前台用文字節點顯示才不會有這問題）。
+function escAttr(str){
+  return String(str==null?'':str)
+    .replace(/&/g,'&amp;')
+    .replace(/"/g,'&quot;')
+    .replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;');
+}
 
 /* =========================================================
    檔案上傳工具（圖片 / PDF / Word）— 存進 Firestore（免費方案可用，不需要 Storage）
@@ -2203,13 +2213,6 @@ const REAL_STATIONS = [
 function buildDefaultData(){
   const stations = JSON.parse(JSON.stringify(REAL_STATIONS));
 
-  const schedule = [
-    {id:uid('sc'), date:todayStr(), shift:'上午班', stationId:'s1', mentor:'林大藥師'},
-    {id:uid('sc'), date:todayStr(), shift:'下午班', stationId:'s91', mentor:'陳資深藥師'},
-    {id:uid('sc'), date:tomorrowStr(), shift:'上午班', stationId:'s106', mentor:'張組長'},
-    {id:uid('sc'), date:tomorrowStr(), shift:'下午班', stationId:'s38', mentor:'黃藥師'},
-  ];
-
   const codeMap = [
     {code:'磨', stationId:'s38'}, {code:'黃', stationId:'s1'}, {code:'藍', stationId:'s15'}, {code:'紅', stationId:'s28'},
     {code:'V8', stationId:'s57'}, {code:'CK1', stationId:'s73'}, {code:'CK2', stationId:'s73'},
@@ -2224,7 +2227,7 @@ function buildDefaultData(){
   const employees = employeeSeed.map(e => ({id:uid('emp'), empNo:e.empNo, name:e.name, role:e.role}));
   const roster = [];
 
-  return {stations, schedule, progress:{}, user:{name:'王小明', role:'實習生'}, employees, roster, codeMap, currentUserId:null};
+  return {stations, progress:{}, user:{name:'王小明', role:'實習生'}, employees, roster, codeMap, currentUserId:null};
 }
 
 
@@ -2264,13 +2267,6 @@ async function persist(){
     showToast('儲存失敗，請檢查網路連線或 Firebase 設定');
   }
 }
-async function resetDemoData(){
-  DB = buildDefaultData();
-  await persist();
-  route('today');
-  showToast('已重置為示範資料');
-}
-
 /* =========================================================
    狀態
    ========================================================= */
@@ -2411,47 +2407,26 @@ function buildShiftCard(st, shiftLabel, mentor, traineeLabel, auto){
 
 function renderTodayTrainee(user){
   const t = todayStr(), tmr = tomorrowStr();
-  const manualToday = DB.schedule.filter(s=>s.date===t && s.trainee===user.name);
-  const manualTmr = DB.schedule.filter(s=>s.date===tmr && s.trainee===user.name);
 
   let shiftCards = '';
-  if(manualToday.length){
-    shiftCards = manualToday.map(sc=>{
-      const st = findStation(sc.stationId); if(!st) return '';
-      return buildShiftCard(st, sc.shift, sc.mentor, null, false);
-    }).join('');
+  const auto = computeAutoSchedule(user.name, t);
+  if(auto){
+    shiftCards = buildShiftCard(auto.station, '今日班別（'+auto.code+'）', auto.mentor, null, true);
   }else{
-    const auto = computeAutoSchedule(user.name, t);
-    if(auto){
-      shiftCards = buildShiftCard(auto.station, '今日班別（'+auto.code+'）', auto.mentor, null, true);
-    }else{
-      shiftCards = `<div class="empty-note">今天查無您的班表資料。可能是尚未匯入今日班表，或找不到當天與您相同班別代碼的指導藥師。請洽管理者確認。</div>`;
-    }
+    shiftCards = `<div class="empty-note">今天查無您的班表資料。可能是尚未匯入今日班表，或找不到當天與您相同班別代碼的指導藥師。請洽管理者確認。</div>`;
   }
 
   let preview = '';
-  if(manualTmr.length){
-    preview = manualTmr.map(sc=>{
-      const st = findStation(sc.stationId); if(!st) return '';
-      return `
-      <div class="preview-card" style="margin-bottom:10px;">
-        <h4>${st.emoji} ${st.name}（${sc.shift}）</h4>
-        <p>明日指導藥師：${sc.mentor}，請提前預習站別教學重點。</p>
-        <button class="btn btn-outline btn-sm" style="background:rgba(255,255,255,0.15);color:#fff;border-color:rgba(255,255,255,0.5);" onclick="openStation('${st.id}')">預習教學指引</button>
-      </div>`;
-    }).join('');
+  const autoTmr = computeAutoSchedule(user.name, tmr);
+  if(autoTmr){
+    preview = `
+    <div class="preview-card">
+      <h4>${autoTmr.station.emoji} ${autoTmr.station.name}（${autoTmr.code}） · 自動配對</h4>
+      <p>明日指導藥師：${autoTmr.mentor}，請提前預習站別教學重點。</p>
+      <button class="btn btn-outline btn-sm" style="background:rgba(255,255,255,0.15);color:#fff;border-color:rgba(255,255,255,0.5);" onclick="openStation('${autoTmr.station.id}')">預習教學指引</button>
+    </div>`;
   }else{
-    const autoTmr = computeAutoSchedule(user.name, tmr);
-    if(autoTmr){
-      preview = `
-      <div class="preview-card">
-        <h4>${autoTmr.station.emoji} ${autoTmr.station.name}（${autoTmr.code}） · 自動配對</h4>
-        <p>明日指導藥師：${autoTmr.mentor}，請提前預習站別教學重點。</p>
-        <button class="btn btn-outline btn-sm" style="background:rgba(255,255,255,0.15);color:#fff;border-color:rgba(255,255,255,0.5);" onclick="openStation('${autoTmr.station.id}')">預習教學指引</button>
-      </div>`;
-    }else{
-      preview = `<div class="empty-note">尚無明日班表資料。</div>`;
-    }
+    preview = `<div class="empty-note">尚無明日班表資料。</div>`;
   }
 
   return `
@@ -2468,7 +2443,6 @@ function renderTodayTrainee(user){
 function renderTodayStaff(user){
   const t = todayStr();
   const mentoring = findTraineesMentoredBy(user.name, t);
-  const manualToday = DB.schedule.filter(s=>s.date===t);
 
   let mentorBlock = '';
   if(mentoring.length){
@@ -2490,63 +2464,22 @@ function renderTodayStaff(user){
     mentorBlock = `<div class="empty-note">根據今日班表自動比對，目前沒有需要您指導的學員。</div>`;
   }
 
-  const otherBlock = manualToday.length ? manualToday.map(sc=>{
-    const st = findStation(sc.stationId); if(!st) return '';
-    return buildShiftCard(st, sc.shift, sc.mentor, sc.trainee, false);
-  }).join('') : '';
-
   return `
   <div class="view">
     <div class="greeting">早安，${user.name}！</div>
     <div class="greeting-sub">今天是 ${t}（${weekdayZh(t)}），以下是根據班表自動比對的教學配對。</div>
     <div class="section-label"><span>🧑‍🏫 教學配對</span><div class="dash"></div></div>
     ${mentorBlock}
-    ${otherBlock ? `<div class="section-label"><span>📋 其他手動班表</span><div class="dash"></div></div>${otherBlock}` : ''}
   </div>`;
 }
 
 function renderTodayGeneric(){
-  const t = todayStr(), tmr = tomorrowStr();
-  const todaySched = DB.schedule.filter(s=>s.date===t);
-  const tmrSched = DB.schedule.filter(s=>s.date===tmr);
-
-  let shiftCards = '';
-  if(todaySched.length===0){
-    shiftCards = `<div class="empty-note">今天尚無班表資料。請至「後台管理 → 班表管理」新增或匯入班表。</div>`;
-  }else{
-    shiftCards = todaySched.map(sc=>{
-      const st = findStation(sc.stationId);
-      if(!st) return '';
-      return buildShiftCard(st, sc.shift, sc.mentor, sc.trainee, false);
-    }).join('');
-  }
-
-  let preview = '';
-  if(tmrSched.length){
-    preview = tmrSched.map(sc=>{
-      const st = findStation(sc.stationId);
-      if(!st) return '';
-      return `
-      <div class="preview-card" style="margin-bottom:10px;">
-        <h4>${st.emoji} ${st.name}（${sc.shift}）${sc.trainee?` · ${sc.trainee}`:''}</h4>
-        <p>明日指導藥師：${sc.mentor}，請提前預習站別教學重點。</p>
-        <button class="btn btn-outline btn-sm" style="background:rgba(255,255,255,0.15);color:#fff;border-color:rgba(255,255,255,0.5);" onclick="openStation('${st.id}')">預習教學指引</button>
-      </div>`;
-    }).join('');
-  }else{
-    preview = `<div class="empty-note">尚無明日班表資料。</div>`;
-  }
-
+  const t = todayStr();
   return `
   <div class="view">
     <div class="greeting">早安，${DB.user.name}！</div>
-    <div class="greeting-sub">今天是 ${t}（${weekdayZh(t)}），以下是您的班表與指導藥師資訊。</div>
-
-    <div class="section-label"><span>📅 今日學習站別</span><div class="dash"></div></div>
-    ${shiftCards}
-
-    <div class="section-label"><span>🔭 明日預告</span><div class="dash"></div></div>
-    ${preview}
+    <div class="greeting-sub">今天是 ${t}（${weekdayZh(t)}）。</div>
+    <div class="empty-note">此身份（書記）目前沒有對應的班表配對畫面。如需查看教學內容，請至「站別指引」頁籤瀏覽。</div>
   </div>`;
 }
 
@@ -2585,15 +2518,23 @@ function setStationsTab(t){ S.stationsTab=t; renderApp(); }
 /* =========================================================
    STATION DETAIL VIEW
    ========================================================= */
+function findAnyStaffForStation(stationId, date){
+  const codes = DB.codeMap.filter(c=>c.stationId===stationId).map(c=>c.code);
+  for(const code of codes){
+    const name = findMentorForCode(date, code, null);
+    if(name) return {name, code};
+  }
+  return null;
+}
 function renderStationDetail(){
   const st = findStation(S.stationId);
   if(!st){ S.view='stations'; return renderStationList(); }
   const c = STATION_COLORS.find(c=>c.id===st.color) || STATION_COLORS[0];
   const checked = getChecked(st.id);
   const pct = percentDone(st);
-  const todaySched = DB.schedule.find(s=>s.date===todayStr() && s.stationId===st.id);
-  const mentorName = todaySched ? todaySched.mentor : '尚未安排';
-  const shiftLabel = todaySched ? todaySched.shift : '無班表';
+  const todayMatch = findAnyStaffForStation(st.id, todayStr());
+  const mentorName = todayMatch ? todayMatch.name : '尚未安排';
+  const shiftLabel = todayMatch ? `今日班別（${todayMatch.code}）` : '無班表';
 
   const stationOptions = ['weekday','sat','sun'].map(dt=>{
     const opts = DB.stations.filter(s=>(s.dayType||'weekday')===dt).map(s=>`<option value="${s.id}" ${s.id===st.id?'selected':''}>${s.emoji} ${s.name}（${s.code}）</option>`).join('');
@@ -2753,8 +2694,6 @@ function renderAdminStations(){
   return `
     ${groupsHtml}
     <button class="btn btn-outline btn-block" style="margin-top:14px;" onclick="addStation()">＋ 新增站別</button>
-    <div class="subhead">示範資料</div>
-    <button class="btn btn-danger btn-block" onclick="resetDemoData()">重置為預設示範資料</button>
   `;
 }
 
@@ -2806,8 +2745,8 @@ function renderStationEditor(stationId){
   return `
     <button class="back-btn" style="margin-bottom:10px;" onclick="S.editingStation=null;renderApp();">← 回站別列表</button>
     <div class="card">
-      <div class="form-group"><label>站別名稱</label><input type="text" value="${st.name}" onchange="updateStationField('${st.id}','name',this.value)"></div>
-      <div class="form-group"><label>站別代碼／簡稱</label><input type="text" value="${st.code}" onchange="updateStationField('${st.id}','code',this.value)"></div>
+      <div class="form-group"><label>站別名稱</label><input type="text" value="${escAttr(st.name)}" onchange="updateStationField('${st.id}','name',this.value)"></div>
+      <div class="form-group"><label>站別代碼／簡稱</label><input type="text" value="${escAttr(st.code)}" onchange="updateStationField('${st.id}','code',this.value)"></div>
       <div class="form-group"><label>圖示</label><select onchange="updateStationField('${st.id}','emoji',this.value)">${emojiOpts}</select></div>
       <div class="form-group"><label>主題色</label><div class="color-picker">${swatches}</div></div>
       <div class="form-group"><label>班別分類</label>
@@ -2848,9 +2787,9 @@ function editTeachingPoint(stId, tpId){
   const tp = st.teachingPoints.find(t=>t.id===tpId);
   openModal(`
     <div class="modal-top"><h4>編輯教學重點</h4><button class="modal-close" onclick="closeModal()">✕</button></div>
-    <div class="form-group"><label>標題</label><input type="text" id="edit-tp-title" value="${tp.title}"></div>
+    <div class="form-group"><label>標題</label><input type="text" id="edit-tp-title" value="${escAttr(tp.title)}"></div>
     <div class="form-group"><label>重點內容（每行一項）</label><textarea id="edit-tp-bullets">${tp.bullets.join('\n')}</textarea></div>
-    <div class="form-group"><label>圖片網址（選填，也可用下方上傳檔案）</label><input type="text" id="edit-tp-image" value="${tp.image||''}"></div>
+    <div class="form-group"><label>圖片網址（選填，也可用下方上傳檔案）</label><input type="text" id="edit-tp-image" value="${escAttr(tp.image)}"></div>
     <div class="subhead" style="margin-top:14px;">教材附件（圖片／PDF／Word）</div>
     ${renderAdminAttachmentChips(tp.attachments, `removeTpAttachment('${stId}','${tpId}',`)}
     <input type="file" id="tp-att-input" accept="image/*,.pdf,.doc,.docx" multiple style="width:100%;margin-bottom:6px;">
@@ -2861,6 +2800,7 @@ function editTeachingPoint(stId, tpId){
   `);
 }
 function captureTpModalFields(){
+  forceCommitActiveInput();
   return {
     title: document.getElementById('edit-tp-title').value.trim(),
     bullets: document.getElementById('edit-tp-bullets').value.split('\n').map(s=>s.trim()).filter(Boolean),
@@ -2966,7 +2906,7 @@ function renderItemSectionsEditor(sections, stId, catId, itemId){
         <b style="font-size:12px;color:var(--ink-soft);">提醒事項 ${i+1}</b>
         <button type="button" class="mini-x" onclick="removeItemSectionAt('${stId}','${catId}','${itemId}',${i})">✕ 刪除</button>
       </div>
-      <div class="form-group" style="margin-bottom:6px;"><label>標題（紅字顯示）</label><input type="text" class="section-title-input" data-idx="${i}" value="${s.title||''}"></div>
+      <div class="form-group" style="margin-bottom:6px;"><label>標題（紅字顯示）</label><input type="text" class="section-title-input" data-idx="${i}" value="${escAttr(s.title)}"></div>
       <div class="form-group" style="margin-bottom:8px;"><label>說明內容</label><textarea class="section-text-input" data-idx="${i}">${s.text||''}</textarea></div>
       <div class="subhead" style="margin:8px 0 6px;font-size:11px;">此項附件（圖片／PDF／Word）</div>
       ${renderAdminAttachmentChips(s.attachments, `removeSectionAttachment('${stId}','${catId}','${itemId}',${i},`)}
@@ -2975,7 +2915,16 @@ function renderItemSectionsEditor(sections, stId, catId, itemId){
       <div id="section-att-status-${i}" style="margin-top:4px;"></div>
     </div>`).join('');
 }
+function forceCommitActiveInput(){
+  // 中文/日文等輸入法連續輸入時，若按鈕在「選字尚未確定」的當下被按下，
+  // 讀取到的 value 會漏掉還沒確定的字。這裡強制讓目前聚焦的輸入框先失焦、
+  // 逼輸入法把選字送出確定，再進行讀取，避免存檔漏字。
+  if(document.activeElement && typeof document.activeElement.blur === 'function'){
+    document.activeElement.blur();
+  }
+}
 function readSectionsFromModal(){
+  forceCommitActiveInput();
   const titles = Array.from(document.querySelectorAll('.section-title-input'));
   const texts = Array.from(document.querySelectorAll('.section-text-input'));
   return titles.map((t,i)=>({
@@ -2995,14 +2944,14 @@ function editItem(stId, catId, itemId, sectionsOverride){
   editingItemSections = sectionsOverride || migrateDetailToSections(item.detail);
   openModal(`
     <div class="modal-top"><h4>編輯檢核項目</h4><button class="modal-close" onclick="closeModal()">✕</button></div>
-    <div class="form-group"><label>項目文字</label><input type="text" id="edit-item-text" value="${item.text}"></div>
+    <div class="form-group"><label>項目文字</label><input type="text" id="edit-item-text" value="${escAttr(item.text)}"></div>
     <div class="chk-inline"><input type="checkbox" id="edit-item-important" ${item.important?'checked':''}><label for="edit-item-important" style="margin:0;font-weight:400;">標記為最重要項目</label></div>
     <div class="chk-inline"><input type="checkbox" id="edit-item-hasdetail" ${item.detail?'checked':''} onchange="document.getElementById('detail-fields').style.display=this.checked?'block':'none'; if(this.checked){ if(document.querySelectorAll('.section-title-input').length===0){ addItemSection('${stId}','${catId}','${itemId}'); } else { setTimeout(()=>{ const el=document.getElementById('item-sections-container'); if(el) el.scrollIntoView({behavior:'smooth',block:'start'}); }, 50); } }"><label for="edit-item-hasdetail" style="margin:0;font-weight:400;">此項目有特殊教學內容（點文字彈出小視窗）</label></div>
     <div id="detail-fields" style="display:${item.detail?'block':'none'};border-top:1px dashed var(--line);padding-top:10px;">
       <div class="subhead" style="margin-top:0;">提醒事項</div>
       <div id="item-sections-container">${renderItemSectionsEditor(editingItemSections, stId, catId, itemId)}</div>
       <button type="button" class="btn btn-outline btn-block" style="margin-bottom:14px;" onclick="addItemSection('${stId}','${catId}','${itemId}')">＋ 新增提醒事項</button>
-      <div class="form-group"><label>圖片網址（選填，此為整個項目共用，也可用上方各提醒事項自己的附件）</label><input type="text" id="edit-item-image" value="${d.image||''}"></div>
+      <div class="form-group"><label>圖片網址（選填，此為整個項目共用，也可用上方各提醒事項自己的附件）</label><input type="text" id="edit-item-image" value="${escAttr(d.image)}"></div>
       <div class="subhead" style="margin-top:6px;">整個項目共用的教材附件（圖片／PDF／Word）</div>
       <div id="item-attachments-chips">${renderAdminAttachmentChips(d.attachments, `removeItemAttachment('${stId}','${catId}','${itemId}',`)}</div>
       <input type="file" id="item-att-input" accept="image/*,.pdf,.doc,.docx" multiple style="width:100%;margin-bottom:6px;">
@@ -3071,6 +3020,7 @@ async function removeSectionAttachment(stId, catId, itemId, sectionIdx, attId){
   deleteAttachmentAndPages(removed);
 }
 function captureItemModalFields(){
+  forceCommitActiveInput();
   return {
     text: document.getElementById('edit-item-text').value.trim(),
     important: document.getElementById('edit-item-important').checked,
