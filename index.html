@@ -378,7 +378,6 @@ table.sched-table td{padding:8px 4px;border-bottom:1px solid var(--line);}
 </script>
 <script src="https://www.gstatic.com/firebasejs/10.7.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.7.0/firebase-firestore-compat.js"></script>
-<script src="https://www.gstatic.com/firebasejs/10.7.0/firebase-storage-compat.js"></script>
 </head>
 <body>
 <div id="app"></div>
@@ -398,13 +397,11 @@ const firebaseConfig = {
   appId: "1:530403065615:web:8fef108f933daec60b887a",
   measurementId: "G-XYYKS7XZZQ"
 };
-// 這個 App 專用的 Firestore 文件路徑與 Storage 資料夾，跟班表系統的資料分開存放，避免互相覆蓋
+// 這個 App 專用的 Firestore 文件路徑，跟班表系統的資料分開存放，避免互相覆蓋
 const FIRESTORE_DOC_PATH = ['pharmacy_teaching_app', 'main'];
-const STORAGE_FOLDER = 'pharmacy_teaching_app_attachments';
 
 let firebaseReady = false;
 let firestoreDb = null;
-let storageRef = null;
 function initFirebase(){
   try{
     if(firebaseConfig.apiKey === 'YOUR_API_KEY'){
@@ -413,7 +410,6 @@ function initFirebase(){
     }
     firebase.initializeApp(firebaseConfig);
     firestoreDb = firebase.firestore();
-    storageRef = firebase.storage().ref();
     firebaseReady = true;
     return true;
   }catch(e){
@@ -500,9 +496,12 @@ function weekdayZh(dateStr){
 function uid(prefix){return prefix+'_'+Math.random().toString(36).slice(2,9);}
 
 /* =========================================================
-   檔案上傳工具（圖片 / PDF / Word）— 上傳到 Firebase Storage
+   檔案上傳工具（圖片 / PDF / Word）— 存進 Firestore（免費方案可用，不需要 Storage）
+   每個附件獨立存成一份文件，不會拖累主要資料的大小；
+   Firestore 單一文件上限 1MB，所以單檔大小、PDF 畫質都要控制在安全範圍內。
    ========================================================= */
-const MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024; // 單檔上限 8MB（實際內容存在 Storage，不受 Firestore 1MB 文件限制）
+const ATTACHMENTS_COLLECTION = 'pharmacy_teaching_app_files';
+const MAX_ATTACHMENT_BYTES = 700 * 1024; // 單檔上限 700KB（轉成 base64 後還會再大 33%，需留安全margin）
 function humanFileSize(bytes){
   if(bytes < 1024*1024) return Math.round(bytes/1024)+'KB';
   return (bytes/1024/1024).toFixed(1)+'MB';
@@ -515,15 +514,21 @@ function fileToDataUrl(file){
     reader.readAsDataURL(file);
   });
 }
-async function uploadFileToStorage(path, fileOrBlob){
-  if(!firebaseReady) throw new Error('Firebase 尚未設定完成，無法上傳檔案');
-  const ref = storageRef.child(path);
-  const snapshot = await ref.put(fileOrBlob);
-  return await snapshot.ref.getDownloadURL();
+async function saveAttachmentDoc(id, data){
+  if(!firebaseReady) throw new Error('Firebase 尚未設定完成，無法儲存檔案');
+  await firestoreDb.collection(ATTACHMENTS_COLLECTION).doc(id).set(data);
 }
-function canvasToBlob(canvas, quality){
-  return new Promise(resolve=>canvas.toBlob(resolve, 'image/jpeg', quality));
+async function loadAttachmentDoc(id){
+  if(!firebaseReady) return null;
+  const doc = await firestoreDb.collection(ATTACHMENTS_COLLECTION).doc(id).get();
+  return doc.exists ? doc.data() : null;
 }
+async function deleteAttachmentDoc(id){
+  if(!firebaseReady) return;
+  try{ await firestoreDb.collection(ATTACHMENTS_COLLECTION).doc(id).delete(); }
+  catch(e){ console.error('刪除附件文件失敗', e); }
+}
+function canvasToDataUrl(canvas, quality){ return canvas.toDataURL('image/jpeg', quality); }
 async function waitForPdfjs(timeoutMs){
   const start = Date.now();
   while(typeof window.pdfjsLib === 'undefined'){
@@ -532,58 +537,73 @@ async function waitForPdfjs(timeoutMs){
   }
   return true;
 }
-async function rasterizeAndUploadPdf(file, attId){
+async function rasterizePdfToPages(file){
   const ok = await waitForPdfjs(4000);
   if(!ok) throw new Error('pdf.js 尚未載入完成，請檢查網路連線後重新整理頁面再試一次');
   const arrayBuffer = await file.arrayBuffer();
   const pdf = await pdfjsLib.getDocument({data: arrayBuffer}).promise;
-  const maxPages = Math.min(pdf.numPages, 25);
-  const pageUrls = [];
+  const maxPages = Math.min(pdf.numPages, 15); // Firestore 空間有限，多頁 PDF 只保留前15頁
+  const pages = [];
   for(let i=1;i<=maxPages;i++){
     const page = await pdf.getPage(i);
-    const viewport = page.getViewport({scale: 1.4});
+    const viewport = page.getViewport({scale: 0.9}); // 畫質降低以控制檔案大小
     const canvas = document.createElement('canvas');
     canvas.width = viewport.width; canvas.height = viewport.height;
     const ctx = canvas.getContext('2d');
     await page.render({canvasContext: ctx, viewport: viewport}).promise;
-    const blob = await canvasToBlob(canvas, 0.82);
-    const url = await uploadFileToStorage(`${STORAGE_FOLDER}/${attId}_p${i}.jpg`, blob);
-    pageUrls.push(url);
+    let quality = 0.55;
+    let dataUrl = canvasToDataUrl(canvas, quality);
+    // 若單頁還是太大，持續降低畫質，避免超過 Firestore 單一文件的大小上限
+    while(dataUrl.length > 550*1024 && quality > 0.25){
+      quality -= 0.1;
+      dataUrl = canvasToDataUrl(canvas, quality);
+    }
+    pages.push(dataUrl);
   }
-  return pageUrls;
+  return pages;
+}
+function withTimeout(promise, ms, label){
+  return Promise.race([
+    promise,
+    new Promise((_,reject)=>setTimeout(()=>reject(new Error(`${label||'操作'}逾時（超過 ${ms/1000} 秒無回應，請檢查網路或 Firebase 設定）`)), ms))
+  ]);
 }
 async function processUploadedFile(file){
   const name = file.name;
   const lower = name.toLowerCase();
   const id = uid('att');
-  const basePath = `${STORAGE_FOLDER}/${id}_${name}`;
-  if(file.type.startsWith('image/')){
-    const url = await uploadFileToStorage(basePath, file);
-    return {id, type:'image', name, url};
+  const looksLikeImage = file.type.startsWith('image/') || /\.(jpe?g|png|gif|webp|bmp|jfif|heic|heif)$/i.test(lower);
+
+  if(looksLikeImage){
+    const data = await withTimeout(fileToDataUrl(file), 15000, '圖片讀取');
+    await withTimeout(saveAttachmentDoc(id, {type:'image', name, data}), 15000, '圖片儲存');
+    return {id, type:'image', name};
   }
   if(lower.endsWith('.pdf') || file.type==='application/pdf'){
-    const url = await uploadFileToStorage(basePath, file); // 原始檔備援下載
-    let pageUrls = [];
-    try{ pageUrls = await rasterizeAndUploadPdf(file, id); }
-    catch(e){ console.error('pdf render failed', e); }
-    return {id, type:'pdf', name, url, pageUrls, pageCount: pageUrls.length};
+    const pages = await withTimeout(rasterizePdfToPages(file), 60000, 'PDF 轉頁面圖片');
+    // 每一頁分開存成一份文件，避免整份 PDF 超過 Firestore 單一文件 1MB 上限
+    for(let i=0;i<pages.length;i++){
+      await withTimeout(saveAttachmentDoc(`${id}_p${i+1}`, {type:'pdf_page', data:pages[i]}), 15000, `PDF 第${i+1}頁儲存`);
+    }
+    await withTimeout(saveAttachmentDoc(id, {type:'pdf', name, pageCount:pages.length}), 15000, 'PDF 資訊儲存');
+    return {id, type:'pdf', name, pageCount: pages.length};
   }
   if(lower.endsWith('.docx')){
-    const url = await uploadFileToStorage(basePath, file);
     let html = '';
     try{
       const arrayBuffer = await file.arrayBuffer();
       const result = await mammoth.convertToHtml({arrayBuffer});
       html = result.value;
-      if(html.length > 200000){ html = html.slice(0,200000) + '<p>（內容過長，已截斷，請下載原始檔查看完整內容）</p>'; }
-    }catch(e){ console.error('mammoth convert failed', e); html = ''; }
-    return {id, type:'docx', name, url, html};
+      if(html.length > 500000){ html = html.slice(0,500000) + '<p>（內容過長，已截斷）</p>'; }
+    }catch(e){ console.error('mammoth convert failed', e); html = '<p>（無法預覽此檔案內容）</p>'; }
+    await withTimeout(saveAttachmentDoc(id, {type:'docx', name, html}), 15000, 'Word 儲存');
+    return {id, type:'docx', name};
   }
   if(lower.endsWith('.doc')){
-    const url = await uploadFileToStorage(basePath, file);
-    return {id, type:'doc', name, url, html:''};
+    await withTimeout(saveAttachmentDoc(id, {type:'doc', name, html:'<p>舊版 .doc 格式無法預覽內容。</p>'}), 15000, 'Word 儲存');
+    return {id, type:'doc', name};
   }
-  throw new Error('unsupported file type: '+name);
+  throw new Error('不支援的檔案格式：'+name);
 }
 function attIcon(type){ return type==='pdf' ? '📄' : (type==='docx'||type==='doc') ? '📝' : '🖼'; }
 
@@ -591,19 +611,15 @@ function renderAdminAttachmentChips(attachments, removeOnclickPrefix){
   if(!attachments || !attachments.length) return '<p style="font-size:11.5px;color:var(--ink-soft);margin:0 0 8px;">尚未上傳任何教材附件。</p>';
   return attachments.map(a=>`
     <div class="admin-item-row">
-      <div class="t">${attIcon(a.type)} ${a.name}${a.type==='pdf'?` · ${a.pageCount||(a.pageUrls&&a.pageUrls.length)||(a.pages&&a.pages.length)||0} 頁`:''}</div>
+      <div class="t">${attIcon(a.type)} ${a.name}${a.type==='pdf'?` · ${a.pageCount||0} 頁`:''}</div>
       <button class="mini-x" onclick="${removeOnclickPrefix}'${a.id}')">✕</button>
     </div>`).join('');
 }
 window.__pdfPages = {};
-function pdfSlideViewer(att){
-  const pages = att.pageUrls || att.pages || []; // 新資料用 pageUrls（Storage 連結），舊資料相容 pages（base64）
+function pdfSlideViewer(att, pages){
   const viewerId = 'pdfv_'+att.id;
-  if(!pages.length){
-    return `<div class="pdf-viewer" id="${viewerId}">
-      <p style="font-size:12px;color:var(--danger);margin-bottom:8px;">此 PDF 目前無法在頁面內預覽。</p>
-      ${att.url ? `<a class="btn btn-ghost btn-block" style="margin-bottom:10px;" href="${att.url}" target="_blank" rel="noopener">📄 開啟原始 PDF：${att.name}</a>` : ''}
-    </div>`;
+  if(!pages || !pages.length){
+    return `<div class="pdf-viewer" id="${viewerId}"><p style="font-size:12px;color:var(--danger);margin-bottom:8px;">此 PDF 目前無法在頁面內預覽。</p></div>`;
   }
   window.__pdfPages[att.id] = pages;
   return `
@@ -627,19 +643,40 @@ function pdfNav(attId, viewerId, dir){
   document.getElementById(viewerId+'_img').src = pages[page];
   document.getElementById(viewerId+'_label').textContent = (page+1)+' / '+pages.length;
 }
-function renderViewerAttachments(attachments){
+async function fetchAttachmentForViewing(stub){
+  try{
+    if(stub.type==='pdf'){
+      const pages = [];
+      for(let i=1;i<=(stub.pageCount||0);i++){
+        const doc = await loadAttachmentDoc(`${stub.id}_p${i}`);
+        if(doc && doc.data) pages.push(doc.data);
+      }
+      return {...stub, pages};
+    }
+    const doc = await loadAttachmentDoc(stub.id);
+    if(!doc) return {...stub, error:true};
+    return {...stub, ...doc};
+  }catch(e){
+    console.error('讀取附件失敗', e);
+    return {...stub, error:true};
+  }
+}
+async function renderViewerAttachmentsAsync(attachments){
   if(!attachments || !attachments.length) return '';
-  return attachments.map(a=>{
-    const src = a.url || a.data; // 新資料用 url（Storage 連結），舊資料相容 data（base64）
+  const hydrated = await Promise.all(attachments.map(fetchAttachmentForViewing));
+  return hydrated.map(a=>{
+    if(a.error){
+      return `<p style="font-size:12px;color:var(--danger);">「${a.name}」載入失敗，請檢查網路連線。</p>`;
+    }
     if(a.type==='image'){
-      return `<img class="modal-img" src="${src}" alt="${a.name}"><div class="modal-img-cap">${a.name}</div>`;
+      return `<img class="modal-img" src="${a.data}" alt="${a.name}"><div class="modal-img-cap">${a.name}</div>`;
     }
     if(a.type==='pdf'){
-      return pdfSlideViewer(a);
+      return pdfSlideViewer(a, a.pages);
     }
     if(a.type==='docx' || a.type==='doc'){
-      const preview = a.html ? `<div style="border:1px solid var(--line);border-radius:var(--radius-sm);padding:10px 12px;max-height:320px;overflow-y:auto;font-size:12.5px;line-height:1.6;margin-bottom:8px;background:var(--bg);">${a.html}</div>` : '<p style="font-size:12px;color:var(--ink-soft);">此檔案無法預覽，請下載查看。</p>';
-      return `${preview}${src?`<a class="btn btn-ghost btn-block" style="margin-bottom:10px;" href="${src}" ${a.url?'target="_blank" rel="noopener"':`download="${a.name}"`}>📝 ${a.url?'開啟':'下載'}原始檔：${a.name}</a>`:''}`;
+      const preview = a.html ? `<div style="border:1px solid var(--line);border-radius:var(--radius-sm);padding:10px 12px;max-height:320px;overflow-y:auto;font-size:12.5px;line-height:1.6;margin-bottom:8px;background:var(--bg);">${a.html}</div>` : '<p style="font-size:12px;color:var(--ink-soft);">此檔案無法預覽。</p>';
+      return preview;
     }
     return '';
   }).join('');
@@ -2625,17 +2662,25 @@ async function resetStationProgress(stationId){
 
 function openStation(id){ S.stationId=id; S.view='station-detail'; renderApp(); window.scrollTo(0,0); }
 
-function openItemModal(stationId, itemId){
+async function openItemModal(stationId, itemId){
   const st = findStation(stationId);
   const item = st.categories.flatMap(c=>c.items).find(i=>i.id===itemId);
   if(!item || !item.detail) return;
   const d = item.detail;
   const sections = migrateDetailToSections(d);
-  const sectionsHtml = sections.map(s=>`
+  openModal(`
+    <div class="modal-top">
+      <h4>${item.text}</h4>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <p style="font-size:12px;color:var(--ink-soft);text-align:center;padding:16px 0;">載入中…</p>
+  `);
+  const sectionsHtml = (await Promise.all(sections.map(async s=>`
     ${s.title ? `<div class="modal-summary">⚠ ${s.title}</div>` : ''}
     ${s.text ? `<p style="font-size:13px;line-height:1.7;color:var(--ink);white-space:pre-line;margin:0 0 10px;">${s.text}</p>` : ''}
-    ${renderViewerAttachments(s.attachments)}
-  `).join('');
+    ${await renderViewerAttachmentsAsync(s.attachments)}
+  `))).join('');
+  const itemAttHtml = await renderViewerAttachmentsAsync(d.attachments);
   openModal(`
     <div class="modal-top">
       <h4>${item.text}</h4>
@@ -2643,11 +2688,11 @@ function openItemModal(stationId, itemId){
     </div>
     ${sectionsHtml}
     ${d.image?`<img class="modal-img" src="${d.image}" alt="教學圖示"><div class="modal-img-cap">教學圖解示範</div>`:''}
-    ${renderViewerAttachments(d.attachments)}
+    ${itemAttHtml}
     <button class="btn btn-primary btn-block" onclick="closeModal()">我知道了</button>
   `);
 }
-function openImageModal(tpId, stationId){
+async function openImageModal(tpId, stationId){
   const st = findStation(stationId);
   const tp = st.teachingPoints.find(t=>t.id===tpId);
   if(!tp) return;
@@ -2656,8 +2701,16 @@ function openImageModal(tpId, stationId){
       <h4>${tp.title}</h4>
       <button class="modal-close" onclick="closeModal()">✕</button>
     </div>
+    <p style="font-size:12px;color:var(--ink-soft);text-align:center;padding:16px 0;">載入中…</p>
+  `);
+  const attHtml = await renderViewerAttachmentsAsync(tp.attachments);
+  openModal(`
+    <div class="modal-top">
+      <h4>${tp.title}</h4>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
     ${tp.image ? `<img class="modal-img" src="${tp.image}" alt="${tp.title}"><div class="modal-img-cap">圖解示範</div>` : ''}
-    ${renderViewerAttachments(tp.attachments, ()=>openImageModal(tpId, stationId))}
+    ${attHtml}
     <ul class="modal-steps" style="padding-left:18px;">${tp.bullets.map(b=>`<li>${b}</li>`).join('')}</ul>
     <button class="btn btn-primary btn-block" onclick="closeModal()">關閉</button>
   `);
@@ -2801,7 +2854,7 @@ function editTeachingPoint(stId, tpId){
     <div class="subhead" style="margin-top:14px;">教材附件（圖片／PDF／Word）</div>
     ${renderAdminAttachmentChips(tp.attachments, `removeTpAttachment('${stId}','${tpId}',`)}
     <input type="file" id="tp-att-input" accept="image/*,.pdf,.doc,.docx" multiple style="width:100%;margin-bottom:6px;">
-    <p style="font-size:11px;color:var(--ink-soft);margin:0 0 8px;">單檔建議 3.5MB 以內；Word（.docx）會自動轉換為可預覽內容。</p>
+    <p style="font-size:11px;color:var(--ink-soft);margin:0 0 8px;">單檔請控制在 700KB 以內（Firestore 免費方案限制，圖片/PDF/Word 皆同）；Word（.docx）會自動轉換為可預覽內容。</p>
     <button class="btn btn-ghost btn-block" style="margin-bottom:6px;" onclick="uploadTpAttachments('${stId}','${tpId}')">上傳選取的檔案</button>
     <div id="tp-att-status" style="margin-bottom:10px;"></div>
     <button class="btn btn-primary btn-block" onclick="saveTeachingPoint('${stId}','${tpId}')">儲存</button>
@@ -2851,13 +2904,22 @@ async function uploadTpAttachments(stId, tpId){
     : `<p style="color:var(--primary-dk);font-size:11.5px;">✓ 已上傳 ${newAtts.length} 個檔案</p>`;
   setUploadStatus('tp-att-status', summary);
 }
+async function deleteAttachmentAndPages(att){
+  if(!att) return;
+  if(att.type==='pdf'){
+    for(let i=1;i<=(att.pageCount||0);i++){ await deleteAttachmentDoc(`${att.id}_p${i}`); }
+  }
+  await deleteAttachmentDoc(att.id);
+}
 async function removeTpAttachment(stId, tpId, attId){
   const st = findStation(stId);
   const tp = st.teachingPoints.find(t=>t.id===tpId);
+  const removed = (tp.attachments||[]).find(a=>a.id===attId);
   const f = captureTpModalFields();
   tp.title = f.title || tp.title; tp.bullets = f.bullets; tp.image = f.image;
   tp.attachments = (tp.attachments||[]).filter(a=>a.id!==attId);
   await persist();
+  deleteAttachmentAndPages(removed);
   editTeachingPoint(stId, tpId);
 }
 
@@ -2935,31 +2997,48 @@ function editItem(stId, catId, itemId, sectionsOverride){
     <div class="modal-top"><h4>編輯檢核項目</h4><button class="modal-close" onclick="closeModal()">✕</button></div>
     <div class="form-group"><label>項目文字</label><input type="text" id="edit-item-text" value="${item.text}"></div>
     <div class="chk-inline"><input type="checkbox" id="edit-item-important" ${item.important?'checked':''}><label for="edit-item-important" style="margin:0;font-weight:400;">標記為最重要項目</label></div>
-    <div class="chk-inline"><input type="checkbox" id="edit-item-hasdetail" ${item.detail?'checked':''} onchange="document.getElementById('detail-fields').style.display=this.checked?'block':'none'"><label for="edit-item-hasdetail" style="margin:0;font-weight:400;">此項目有特殊教學內容（點文字彈出小視窗）</label></div>
+    <div class="chk-inline"><input type="checkbox" id="edit-item-hasdetail" ${item.detail?'checked':''} onchange="document.getElementById('detail-fields').style.display=this.checked?'block':'none'; if(this.checked){ if(document.querySelectorAll('.section-title-input').length===0){ addItemSection('${stId}','${catId}','${itemId}'); } else { setTimeout(()=>{ const el=document.getElementById('item-sections-container'); if(el) el.scrollIntoView({behavior:'smooth',block:'start'}); }, 50); } }"><label for="edit-item-hasdetail" style="margin:0;font-weight:400;">此項目有特殊教學內容（點文字彈出小視窗）</label></div>
     <div id="detail-fields" style="display:${item.detail?'block':'none'};border-top:1px dashed var(--line);padding-top:10px;">
       <div class="subhead" style="margin-top:0;">提醒事項</div>
       <div id="item-sections-container">${renderItemSectionsEditor(editingItemSections, stId, catId, itemId)}</div>
       <button type="button" class="btn btn-outline btn-block" style="margin-bottom:14px;" onclick="addItemSection('${stId}','${catId}','${itemId}')">＋ 新增提醒事項</button>
       <div class="form-group"><label>圖片網址（選填，此為整個項目共用，也可用上方各提醒事項自己的附件）</label><input type="text" id="edit-item-image" value="${d.image||''}"></div>
       <div class="subhead" style="margin-top:6px;">整個項目共用的教材附件（圖片／PDF／Word）</div>
-      ${renderAdminAttachmentChips(d.attachments, `removeItemAttachment('${stId}','${catId}','${itemId}',`)}
+      <div id="item-attachments-chips">${renderAdminAttachmentChips(d.attachments, `removeItemAttachment('${stId}','${catId}','${itemId}',`)}</div>
       <input type="file" id="item-att-input" accept="image/*,.pdf,.doc,.docx" multiple style="width:100%;margin-bottom:6px;">
-      <p style="font-size:11px;color:var(--ink-soft);margin:0 0 8px;">單檔建議 3.5MB 以內；Word（.docx）會自動轉換為可預覽內容。</p>
+      <p style="font-size:11px;color:var(--ink-soft);margin:0 0 8px;">單檔請控制在 700KB 以內（Firestore 免費方案限制，圖片/PDF/Word 皆同）；Word（.docx）會自動轉換為可預覽內容。</p>
       <button type="button" class="btn btn-ghost btn-block" style="margin-bottom:6px;" onclick="uploadItemAttachments('${stId}','${catId}','${itemId}')">上傳選取的檔案</button>
       <div id="item-att-status"></div>
     </div>
     <button class="btn btn-primary btn-block" style="margin-top:8px;" onclick="saveItem('${stId}','${catId}','${itemId}')">儲存</button>
   `);
+  if(item.detail){
+    setTimeout(()=>{
+      const el = document.getElementById('item-sections-container');
+      if(el) el.scrollIntoView({behavior:'smooth', block:'start'});
+    }, 60);
+  }
+}
+function refreshItemSectionsUI(stId, catId, itemId, sections){
+  editingItemSections = sections;
+  const container = document.getElementById('item-sections-container');
+  if(container){
+    container.innerHTML = renderItemSectionsEditor(sections, stId, catId, itemId);
+  }
 }
 function addItemSection(stId, catId, itemId){
   const current = readSectionsFromModal();
   current.push({title:'', text:'', attachments:[]});
-  editItem(stId, catId, itemId, current);
+  refreshItemSectionsUI(stId, catId, itemId, current);
+  setTimeout(()=>{
+    const el = document.getElementById('item-sections-container');
+    if(el) el.scrollIntoView({behavior:'smooth', block:'start'});
+  }, 60);
 }
 function removeItemSectionAt(stId, catId, itemId, idx){
   const current = readSectionsFromModal();
   current.splice(idx,1);
-  editItem(stId, catId, itemId, current);
+  refreshItemSectionsUI(stId, catId, itemId, current);
 }
 async function uploadSectionAttachments(stId, catId, itemId, sectionIdx){
   const input = document.getElementById('section-att-input-'+sectionIdx);
@@ -2977,17 +3056,19 @@ async function uploadSectionAttachments(stId, catId, itemId, sectionIdx){
     catch(e){ console.error(e); errors.push(`${file.name} 上傳失敗：${e.message||e}`); }
   }
   current[sectionIdx].attachments = (current[sectionIdx].attachments||[]).concat(newAtts);
-  editItem(stId, catId, itemId, current);
+  refreshItemSectionsUI(stId, catId, itemId, current);
   const summary = errors.length
     ? `<p style="color:var(--danger);font-size:11px;">已上傳 ${newAtts.length} 個；失敗：${errors.join('；')}</p>`
     : `<p style="color:var(--primary-dk);font-size:11px;">✓ 已上傳 ${newAtts.length} 個檔案</p>`;
-  setUploadStatus(statusId, summary);
+  setUploadStatus('section-att-status-'+sectionIdx, summary);
 }
 async function removeSectionAttachment(stId, catId, itemId, sectionIdx, attId){
   const current = readSectionsFromModal();
   if(!current[sectionIdx]) return;
+  const removed = (current[sectionIdx].attachments||[]).find(a=>a.id===attId);
   current[sectionIdx].attachments = (current[sectionIdx].attachments||[]).filter(a=>a.id!==attId);
-  editItem(stId, catId, itemId, current);
+  refreshItemSectionsUI(stId, catId, itemId, current);
+  deleteAttachmentAndPages(removed);
 }
 function captureItemModalFields(){
   return {
@@ -3021,11 +3102,7 @@ async function uploadItemAttachments(stId, catId, itemId){
   const st = findStation(stId);
   const cat = st.categories.find(c=>c.id===catId);
   const item = cat.items.find(i=>i.id===itemId);
-  const f = captureItemModalFields();
   const prevAttachments = (item.detail && item.detail.attachments) || [];
-  item.text = f.text || item.text;
-  item.important = f.important;
-  item.detail = { sections:f.sections, image:f.image, attachments:prevAttachments };
   const newAtts = [];
   const errors = [];
   for(const file of files){
@@ -3033,9 +3110,13 @@ async function uploadItemAttachments(stId, catId, itemId){
     try{ newAtts.push(await processUploadedFile(file)); }
     catch(e){ console.error(e); errors.push(`${file.name} 上傳失敗：${e.message||e}`); }
   }
-  item.detail.attachments = prevAttachments.concat(newAtts);
+  const mergedAttachments = prevAttachments.concat(newAtts);
+  if(!item.detail) item.detail = { sections:[], image:'', attachments:[] };
+  item.detail.attachments = mergedAttachments;
   await persist();
-  editItem(stId, catId, itemId, f.sections);
+  const chipsEl = document.getElementById('item-attachments-chips');
+  if(chipsEl) chipsEl.innerHTML = renderAdminAttachmentChips(mergedAttachments, `removeItemAttachment('${stId}','${catId}','${itemId}',`);
+  if(input) input.value = '';
   const summary = errors.length
     ? `<p style="color:var(--danger);font-size:11.5px;">已上傳 ${newAtts.length} 個檔案；失敗：${errors.join('；')}</p>`
     : `<p style="color:var(--primary-dk);font-size:11.5px;">✓ 已上傳 ${newAtts.length} 個檔案</p>`;
@@ -3045,13 +3126,14 @@ async function removeItemAttachment(stId, catId, itemId, attId){
   const st = findStation(stId);
   const cat = st.categories.find(c=>c.id===catId);
   const item = cat.items.find(i=>i.id===itemId);
-  const f = captureItemModalFields();
-  item.text = f.text || item.text;
-  item.important = f.important;
-  const prevAttachments = ((item.detail && item.detail.attachments) || []).filter(a=>a.id!==attId);
-  item.detail = { sections:f.sections, image:f.image, attachments:prevAttachments };
+  const removed = ((item.detail && item.detail.attachments) || []).find(a=>a.id===attId);
+  const remaining = ((item.detail && item.detail.attachments) || []).filter(a=>a.id!==attId);
+  if(!item.detail) item.detail = { sections:[], image:'', attachments:[] };
+  item.detail.attachments = remaining;
   await persist();
-  editItem(stId, catId, itemId, f.sections);
+  deleteAttachmentAndPages(removed);
+  const chipsEl = document.getElementById('item-attachments-chips');
+  if(chipsEl) chipsEl.innerHTML = renderAdminAttachmentChips(remaining, `removeItemAttachment('${stId}','${catId}','${itemId}',`);
 }
 
 /* =========================================================
@@ -3291,12 +3373,6 @@ function renderApp(){
 /* =========================================================
    INIT
    ========================================================= */
-function withTimeout(promise, ms, label){
-  return Promise.race([
-    promise,
-    new Promise((_,reject)=>setTimeout(()=>reject(new Error(`${label} 逾時（超過 ${ms/1000} 秒無回應）`)), ms))
-  ]);
-}
 function showFatalError(title, detail){
   document.getElementById('app').innerHTML = `
     <div style="max-width:480px;margin:40px auto;padding:20px;font-family:sans-serif;">
