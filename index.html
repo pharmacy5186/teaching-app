@@ -2227,7 +2227,7 @@ function buildDefaultData(){
   const employees = employeeSeed.map(e => ({id:uid('emp'), empNo:e.empNo, name:e.name, role:e.role}));
   const roster = [];
 
-  return {stations, progress:{}, user:{name:'王小明', role:'實習生'}, employees, roster, codeMap, currentUserId:null};
+  return {stations, progress:{}, user:{name:'王小明', role:'實習生'}, employees, roster, codeMap, currentUserId:null, adminPassword:'0000', learningLog:[]};
 }
 
 
@@ -2257,6 +2257,8 @@ function migrateDB(){
   if(!DB.roster) DB.roster = [];
   if(!DB.codeMap) DB.codeMap = [];
   if(typeof DB.currentUserId === 'undefined') DB.currentUserId = null;
+  if(!DB.adminPassword) DB.adminPassword = '0000';
+  if(!DB.learningLog) DB.learningLog = [];
 }
 async function persist(){
   if(!firebaseReady){ firebaseConfigMissing = true; return; }
@@ -2270,7 +2272,7 @@ async function persist(){
 /* =========================================================
    狀態
    ========================================================= */
-const S = { view:'today', stationId:null, adminTab:'stations', editingStation:null, editingItem:null, stationsTab:'weekday' };
+const S = { view:'today', stationId:null, adminTab:'stations', editingStation:null, editingItem:null, stationsTab:'weekday', adminUnlocked:false, progressTraineeName:null, historyTraineeFilter:'' };
 
 function findStation(id){ return DB.stations.find(s=>s.id===id); }
 
@@ -2320,18 +2322,40 @@ function findTraineesMentoredBy(staffName, date){
   return out;
 }
 
-function progressKey(stationId){ return stationId+'_'+todayStr(); }
-function getChecked(stationId){ return DB.progress[progressKey(stationId)] || []; }
+function progressKey(stationId, traineeName){ return stationId+'_'+(traineeName||'_shared'); }
+function getChecked(stationId, traineeName){ return DB.progress[progressKey(stationId, traineeName)] || []; }
 function totalItems(station){ return station.categories.reduce((a,c)=>a+c.items.length,0); }
-function checkedCount(station){ const arr=getChecked(station.id); return station.categories.reduce((a,c)=>a+c.items.filter(i=>arr.includes(i.id)).length,0); }
-function percentDone(station){ const t=totalItems(station); if(!t) return 0; return Math.round(checkedCount(station)/t*100); }
+function checkedCount(station, traineeName){ const arr=getChecked(station.id, traineeName); return station.categories.reduce((a,c)=>a+c.items.filter(i=>arr.includes(i.id)).length,0); }
+function percentDone(station, traineeName){ if(!traineeName) return 0; const t=totalItems(station); if(!t) return 0; return Math.round(checkedCount(station, traineeName)/t*100); }
 
-async function toggleItem(stationId, itemId){
-  const key = progressKey(stationId);
+async function toggleItem(stationId, itemId, traineeName){
+  if(!traineeName){ showToast('請先選擇要記錄進度的學員'); return; }
+  const key = progressKey(stationId, traineeName);
   const arr = DB.progress[key] ? DB.progress[key].slice() : [];
   const idx = arr.indexOf(itemId);
+  const nowChecking = idx===-1;
   if(idx>-1) arr.splice(idx,1); else arr.push(itemId);
   DB.progress[key] = arr;
+
+  // 記錄學習歷程：誰、在哪個站別、勾了哪一項、當時的導師是誰
+  const st = findStation(stationId);
+  const item = st ? st.categories.flatMap(c=>c.items).find(i=>i.id===itemId) : null;
+  const today = todayStr();
+  const auto = computeAutoSchedule(traineeName, today);
+  if(!DB.learningLog) DB.learningLog = [];
+  DB.learningLog.push({
+    id: uid('log'),
+    traineeName,
+    stationId,
+    stationName: st ? st.name : '',
+    itemId,
+    itemText: item ? item.text : '',
+    checked: nowChecking,
+    mentor: auto ? auto.mentor : null,
+    date: today,
+    timestamp: new Date().toISOString(),
+  });
+
   await persist();
   renderApp();
 }
@@ -2383,8 +2407,8 @@ function renderToday(){
   return renderTodayGeneric();
 }
 
-function buildShiftCard(st, shiftLabel, mentor, traineeLabel, auto){
-  const pct = percentDone(st);
+function buildShiftCard(st, shiftLabel, mentor, traineeLabel, auto, progressTraineeName){
+  const pct = percentDone(st, progressTraineeName);
   return `
   <div class="shift-card">
     <div class="shift-head"><span>${shiftLabel}${traineeLabel?` · 學員：${traineeLabel}`:''}${auto?' · <span style="color:var(--primary);">自動配對</span>':''}</span><span class="pill-tag tag-${st.color}">${st.code}</span></div>
@@ -2399,7 +2423,7 @@ function buildShiftCard(st, shiftLabel, mentor, traineeLabel, auto){
       </div>
       <div class="progress-mini">${blisterMini(pct)}<span>教學完成度 ${pct}%</span></div>
       <div style="margin-top:12px;">
-        <button class="btn btn-primary btn-block" onclick="openStation('${st.id}')">前往教學指引 →</button>
+        <button class="btn btn-primary btn-block" onclick="openStation('${st.id}','${progressTraineeName||''}')">前往教學指引 →</button>
       </div>
     </div>
   </div>`;
@@ -2411,7 +2435,7 @@ function renderTodayTrainee(user){
   let shiftCards = '';
   const auto = computeAutoSchedule(user.name, t);
   if(auto){
-    shiftCards = buildShiftCard(auto.station, '今日班別（'+auto.code+'）', auto.mentor, null, true);
+    shiftCards = buildShiftCard(auto.station, '今日班別（'+auto.code+'）', auto.mentor, null, true, user.name);
   }else{
     shiftCards = `<div class="empty-note">今天查無您的班表資料。可能是尚未匯入今日班表，或找不到當天與您相同班別代碼的指導藥師。請洽管理者確認。</div>`;
   }
@@ -2423,7 +2447,7 @@ function renderTodayTrainee(user){
     <div class="preview-card">
       <h4>${autoTmr.station.emoji} ${autoTmr.station.name}（${autoTmr.code}） · 自動配對</h4>
       <p>明日指導藥師：${autoTmr.mentor}，請提前預習站別教學重點。</p>
-      <button class="btn btn-outline btn-sm" style="background:rgba(255,255,255,0.15);color:#fff;border-color:rgba(255,255,255,0.5);" onclick="openStation('${autoTmr.station.id}')">預習教學指引</button>
+      <button class="btn btn-outline btn-sm" style="background:rgba(255,255,255,0.15);color:#fff;border-color:rgba(255,255,255,0.5);" onclick="openStation('${autoTmr.station.id}','${user.name}')">預習教學指引</button>
     </div>`;
   }else{
     preview = `<div class="empty-note">尚無明日班表資料。</div>`;
@@ -2456,7 +2480,7 @@ function renderTodayStaff(user){
             <div class="mentor-meta"><p class="role">受訓學員</p><p class="name">${m.trainee.name}</p></div>
           </div>
           <div style="margin-top:12px;">
-            <button class="btn btn-primary btn-block" onclick="openStation('${m.station.id}')">前往站別教學指引 →</button>
+            <button class="btn btn-primary btn-block" onclick="openStation('${m.station.id}','${m.trainee.name}')">前往站別教學指引 →</button>
           </div>
         </div>
       </div>`).join('');
@@ -2489,15 +2513,17 @@ function renderTodayGeneric(){
 const DAYTYPE_LABEL = {weekday:'平日班', sat:'週六班', sun:'週日班'};
 function renderStationList(){
   const filtered = DB.stations.filter(st=>(st.dayType||'weekday')===S.stationsTab);
+  const user = currentUser();
+  const traineeCtx = (user && user.role==='trainee') ? user.name : null;
   const rows = filtered.map(st=>{
-    const pct = percentDone(st);
+    const pct = percentDone(st, traineeCtx);
     const c = STATION_COLORS.find(c=>c.id===st.color) || STATION_COLORS[0];
     return `
     <div class="station-list-card" onclick="openStation('${st.id}')">
       <div class="station-emoji" style="background:${c.emoji};">${st.emoji}</div>
       <div class="info">
         <div class="top-row"><span class="name">${st.name}</span><span class="pill-tag tag-${st.color}">${st.code}</span></div>
-        <div class="meta">${totalItems(st)} 項檢核 · 今日完成度 ${pct}%</div>
+        <div class="meta">${totalItems(st)} 項檢核${traineeCtx ? ` · 我的完成度 ${pct}%` : ''}</div>
       </div>
       <div class="chev">›</div>
     </div>`;
@@ -2530,8 +2556,9 @@ function renderStationDetail(){
   const st = findStation(S.stationId);
   if(!st){ S.view='stations'; return renderStationList(); }
   const c = STATION_COLORS.find(c=>c.id===st.color) || STATION_COLORS[0];
-  const checked = getChecked(st.id);
-  const pct = percentDone(st);
+  const traineeName = S.progressTraineeName;
+  const checked = getChecked(st.id, traineeName);
+  const pct = percentDone(st, traineeName);
   const todayMatch = findAnyStaffForStation(st.id, todayStr());
   const mentorName = todayMatch ? todayMatch.name : '尚未安排';
   const shiftLabel = todayMatch ? `今日班別（${todayMatch.code}）` : '無班表';
@@ -2540,6 +2567,16 @@ function renderStationDetail(){
     const opts = DB.stations.filter(s=>(s.dayType||'weekday')===dt).map(s=>`<option value="${s.id}" ${s.id===st.id?'selected':''}>${s.emoji} ${s.name}（${s.code}）</option>`).join('');
     return opts ? `<optgroup label="${DAYTYPE_LABEL[dt]}">${opts}</optgroup>` : '';
   }).join('');
+
+  const traineeOptions = DB.employees.filter(e=>e.role==='trainee').map(e=>`<option value="${escAttr(e.name)}" ${e.name===traineeName?'selected':''}>${e.name}</option>`).join('');
+  const traineePicker = `
+    <div class="hint-banner" style="background:var(--sky);color:#1B4E78;">
+      👤 目前記錄進度的學員：
+      <select onchange="setProgressTrainee(this.value)" style="margin-left:6px;border:1px solid #1B4E78;border-radius:100px;padding:3px 8px;background:#fff;color:#1B4E78;font-size:12px;">
+        <option value="">請選擇學員</option>
+        ${traineeOptions}
+      </select>
+    </div>`;
 
   const tpCards = st.teachingPoints.map(tp=>`
     <div class="tp-card" style="border-left-color:${c.hex}">
@@ -2554,8 +2591,8 @@ function renderStationDetail(){
       const previewSections = hasDetail ? migrateDetailToSections(item.detail) : [];
       return `
       <div class="check-row ${isChecked?'checked':''} ${item.important?'important':''}">
-        <input type="checkbox" ${isChecked?'checked':''} onclick="event.stopPropagation();toggleItem('${st.id}','${item.id}')">
-        <div class="txt" onclick="${hasDetail?`openItemModal('${st.id}','${item.id}')`:`toggleItem('${st.id}','${item.id}')`}">
+        <input type="checkbox" ${isChecked?'checked':''} onclick="event.stopPropagation();toggleItem('${st.id}','${item.id}','${traineeName||''}')">
+        <div class="txt" onclick="${hasDetail?`openItemModal('${st.id}','${item.id}')`:`toggleItem('${st.id}','${item.id}','${traineeName||''}')`}">
           <div class="line">${item.text}${hasDetail?'<span class="info-dot">i</span>':''}</div>
           ${item.important && previewSections.length && previewSections[0].title ? `<div class="note">* 最重要！${previewSections[0].title}</div>` : (item.important ? `<div class="note">* 最重要項目</div>`:'')}
         </div>
@@ -2572,7 +2609,7 @@ function renderStationDetail(){
   <div class="view">
     <div class="back-row">
       <button class="back-btn" onclick="route('stations')">← 回總覽</button>
-      <select class="station-select" onchange="openStation(this.value)">${stationOptions}</select>
+      <select class="station-select" onchange="openStation(this.value, S.progressTraineeName)">${stationOptions}</select>
     </div>
 
     <div class="station-header" style="background:linear-gradient(135deg, ${c.hex}, ${c.hex}CC);">
@@ -2580,28 +2617,46 @@ function renderStationDetail(){
       <h3>${st.emoji} ${st.name}（${st.code}）· 當下教學指引</h3>
       <div class="mentor-line">指導老師：<b>${mentorName}</b></div>
       ${blisterRow(pct)}
-      <div class="progress-label"><span>教學完成度</span><span>${pct}%（${checkedCount(st)}/${totalItems(st)}）</span></div>
+      <div class="progress-label"><span>教學完成度${traineeName?`（${traineeName}）`:''}</span><span>${pct}%（${checkedCount(st, traineeName)}/${totalItems(st)}）</span></div>
     </div>
+
+    ${traineeName ? '' : traineePicker}
 
     <div class="block-title">📖 務必教學重點</div>
     ${tpCards || '<p style="font-size:12.5px;color:var(--ink-soft);">尚未設定教學重點，請至後台新增。</p>'}
 
     <div class="block-title" style="margin-top:22px;">📋 工作檢核表</div>
-    <div class="hint-banner">💡 請老師確認學生了解後再勾選；項目文字旁有「i」標記者，點擊文字可查看教學小視窗。</div>
+    <div class="hint-banner">💡 請老師確認學生了解後再勾選；項目文字旁有「i」標記者，點擊文字可查看教學小視窗。勾選進度會持續累積，不會每天重置，可以分好幾天完成。</div>
     ${catBlocks || '<p style="font-size:12.5px;color:var(--ink-soft);">尚未設定檢核表，請至後台新增。</p>'}
 
-    <div class="reset-row"><button onclick="resetStationProgress('${st.id}')">重新開始本站今日檢核（僅重置勾選）</button></div>
+    ${traineeName ? `<div class="reset-row"><button onclick="resetStationProgress('${st.id}','${traineeName}')">重新開始「${traineeName}」在本站的檢核進度</button></div>` : ''}
   </div>`;
 }
-
-async function resetStationProgress(stationId){
-  delete DB.progress[progressKey(stationId)];
-  await persist();
+function setProgressTrainee(name){
+  S.progressTraineeName = name || null;
   renderApp();
-  showToast('已重置今日檢核勾選');
 }
 
-function openStation(id){ S.stationId=id; S.view='station-detail'; renderApp(); window.scrollTo(0,0); }
+async function resetStationProgress(stationId, traineeName){
+  if(!confirm(`確定要清空「${traineeName}」在這個站別的檢核進度嗎？此動作無法復原。`)) return;
+  delete DB.progress[progressKey(stationId, traineeName)];
+  await persist();
+  renderApp();
+  showToast('已重置該學員的檢核進度');
+}
+
+function openStation(id, traineeName){
+  S.stationId=id;
+  const user = currentUser();
+  if(traineeName){
+    S.progressTraineeName = traineeName;
+  }else if(user && user.role==='trainee'){
+    S.progressTraineeName = user.name;
+  }else{
+    S.progressTraineeName = null;
+  }
+  S.view='station-detail'; renderApp(); window.scrollTo(0,0);
+}
 
 async function openItemModal(stationId, itemId){
   const st = findStation(stationId);
@@ -2668,8 +2723,9 @@ function renderAdmin(){
     <div class="admin-tabs">
       <button class="${S.adminTab==='stations'?'active':''}" onclick="setAdminTab('stations')">站別與檢核表</button>
       <button class="${S.adminTab==='people'?'active':''}" onclick="setAdminTab('people')">學員與人員</button>
+      <button class="${S.adminTab==='history'?'active':''}" onclick="setAdminTab('history')">學習歷程</button>
     </div>
-    ${S.adminTab==='stations' ? renderAdminStations() : renderAdminPeople()}
+    ${S.adminTab==='stations' ? renderAdminStations() : S.adminTab==='people' ? renderAdminPeople() : renderAdminHistory()}
   </div>`;
 }
 function setAdminTab(t){ S.adminTab=t; S.editingStation=null; renderApp(); }
@@ -3132,6 +3188,90 @@ function renderAdminPeople(){
       <div class="form-group"><label>對應站別</label><select id="new-code-station">${stationOptionsFlat}</select></div>
       <button class="btn btn-primary btn-block" onclick="addCodeMap()">新增對照</button>
     </div>
+
+    <div class="subhead">後台管理密碼</div>
+    <p style="font-size:11.5px;color:var(--ink-soft);margin:0 0 10px;">進入「後台管理」需要輸入的密碼，改完立即生效。</p>
+    <div class="card">
+      <div class="form-group"><label>新密碼</label><input type="text" id="new-admin-pw" placeholder="輸入新密碼"></div>
+      <button class="btn btn-primary btn-block" onclick="updateAdminPassword()">更新密碼</button>
+    </div>
+  `;
+}
+async function updateAdminPassword(){
+  const val = (document.getElementById('new-admin-pw').value||'').trim();
+  if(!val){ showToast('請輸入新密碼'); return; }
+  DB.adminPassword = val;
+  await persist();
+  showToast('後台密碼已更新');
+  document.getElementById('new-admin-pw').value = '';
+}
+
+/* =========================================================
+   ADMIN — 學習歷程
+   ========================================================= */
+function setHistoryTraineeFilter(name){
+  S.historyTraineeFilter = name;
+  renderApp();
+}
+function renderAdminHistory(){
+  const trainees = DB.employees.filter(e=>e.role==='trainee');
+  const traineeOptions = trainees.map(e=>`<option value="${escAttr(e.name)}" ${e.name===S.historyTraineeFilter?'selected':''}>${e.name}</option>`).join('');
+
+  if(!trainees.length){
+    return `<p style="font-size:12.5px;color:var(--ink-soft);">目前沒有設定任何學員，請先到「學員與人員」新增。</p>`;
+  }
+
+  const picker = `
+    <div class="form-group">
+      <label>選擇學員</label>
+      <select onchange="setHistoryTraineeFilter(this.value)">
+        <option value="">請選擇學員</option>
+        ${traineeOptions}
+      </select>
+    </div>`;
+
+  if(!S.historyTraineeFilter){
+    return `${picker}<p style="font-size:12.5px;color:var(--ink-soft);margin-top:10px;">選擇一位學員以查看學習歷程。</p>`;
+  }
+
+  const name = S.historyTraineeFilter;
+  const stationSummary = DB.stations.map(st=>{
+    const total = totalItems(st);
+    if(!total) return null;
+    const done = checkedCount(st, name);
+    if(done===0) return null;
+    return {st, done, total, pct: percentDone(st, name)};
+  }).filter(Boolean);
+
+  const summaryHtml = stationSummary.length ? stationSummary.map(s=>`
+    <div class="admin-item-row">
+      <div class="t">${s.st.emoji} <b>${s.st.name}</b>（${s.st.code}） · ${s.done}/${s.total} 項（${s.pct}%）</div>
+    </div>`).join('') : '<p style="font-size:12.5px;color:var(--ink-soft);">此學員尚未開始任何站別的檢核。</p>';
+
+  const logEntries = (DB.learningLog||[])
+    .filter(l=>l.traineeName===name)
+    .sort((a,b)=>b.timestamp.localeCompare(a.timestamp));
+
+  const logHtml = logEntries.length ? logEntries.map(l=>`
+    <tr>
+      <td>${l.date}</td>
+      <td>${l.stationName}</td>
+      <td>${l.itemText}</td>
+      <td>${l.checked ? '<span style="color:var(--primary-dk);">✓ 完成</span>' : '<span style="color:var(--ink-soft);">已取消</span>'}</td>
+      <td>${l.mentor || '（無自動配對紀錄）'}</td>
+    </tr>`).join('') : '';
+
+  return `
+    ${picker}
+    <div class="subhead" style="margin-top:14px;">進度總覽</div>
+    ${summaryHtml}
+    <div class="subhead">詳細紀錄（依時間新到舊）</div>
+    <div style="overflow-x:auto;">
+      <table class="sched-table">
+        <thead><tr><th>日期</th><th>站別</th><th>項目</th><th>狀態</th><th>當時導師</th></tr></thead>
+        <tbody>${logHtml || '<tr><td colspan="5" style="color:var(--ink-soft);padding:14px 4px;">尚無紀錄</td></tr>'}</tbody>
+      </table>
+    </div>
   `;
 }
 
@@ -3171,7 +3311,41 @@ async function deleteCodeMap(id){
 /* =========================================================
    ROOT RENDER
    ========================================================= */
-function route(view){ S.view=view; if(view!=='station-detail'){} renderApp(); window.scrollTo(0,0); }
+let adminPasswordError = '';
+function route(view){
+  if(view==='admin' && !S.adminUnlocked){
+    adminPasswordError = '';
+    S.view = 'admin-lock';
+    renderApp(); window.scrollTo(0,0);
+    return;
+  }
+  S.view=view; if(view!=='station-detail'){} renderApp(); window.scrollTo(0,0);
+}
+function renderAdminLock(){
+  return `
+    <div class="view" style="padding-top:50px;">
+      <div class="rx-mark" style="width:52px;height:52px;font-size:26px;margin:0 auto 24px;">🔒</div>
+      <div style="max-width:300px;margin:0 auto;">
+        <label class="login-field-label">後台管理密碼</label>
+        <input type="password" id="admin-pw-input" class="login-id-input" style="text-align:left;font-size:16px;letter-spacing:normal;font-family:var(--font-body);" onkeydown="if(event.key==='Enter')checkAdminPassword()" autofocus>
+        ${adminPasswordError ? `<p style="color:var(--danger);font-size:12px;margin:10px 0 0;">${adminPasswordError}</p>` : ''}
+        <button class="btn btn-primary btn-block" style="margin-top:16px;" onclick="checkAdminPassword()">進入後台</button>
+        <button class="btn btn-outline btn-block" style="margin-top:8px;" onclick="route('today')">取消</button>
+      </div>
+    </div>`;
+}
+function checkAdminPassword(){
+  const val = (document.getElementById('admin-pw-input').value||'');
+  if(val === DB.adminPassword){
+    S.adminUnlocked = true;
+    adminPasswordError = '';
+    S.view = 'admin';
+    renderApp();
+  }else{
+    adminPasswordError = '密碼錯誤，請再試一次';
+    renderApp();
+  }
+}
 
 /* =========================================================
    登入畫面
@@ -3238,6 +3412,7 @@ async function doLogin(){
 }
 async function doLogout(){
   sessionUserId = null;
+  S.adminUnlocked = false; // 登出後，下一位使用者要重新輸入後台密碼
   renderApp();
 }
 
@@ -3295,6 +3470,7 @@ function renderApp(){
   else if(S.view==='stations') body = renderStationList();
   else if(S.view==='station-detail') body = renderStationDetail();
   else if(S.view==='admin') body = renderAdmin();
+  else if(S.view==='admin-lock') body = renderAdminLock();
 
   app.innerHTML = `
     <div class="shell">
@@ -3312,7 +3488,7 @@ function renderApp(){
       <div class="bottomnav">
         <button class="${S.view==='today'?'active':''}" onclick="route('today')"><span class="ic">🏠</span>今日班表</button>
         <button class="${S.view==='stations'||S.view==='station-detail'?'active':''}" onclick="route('stations')"><span class="ic">📋</span>站別指引</button>
-        <button class="${S.view==='admin'?'active':''}" onclick="route('admin')"><span class="ic">⚙️</span>後台管理</button>
+        <button class="${(S.view==='admin'||S.view==='admin-lock')?'active':''}" onclick="route('admin')"><span class="ic">⚙️</span>後台管理</button>
       </div>
     </div>
     ${modalHtml ? `<div class="modal-overlay" onclick="if(event.target===this)closeModal()"><div class="modal-box">${modalHtml}</div></div>` : ''}
