@@ -3256,7 +3256,7 @@ function renderAdminHistory(){
     </div>`).join('') : '<p style="font-size:12.5px;color:var(--ink-soft);">此學員尚未開始任何站別的檢核。</p>';
 
   const logEntries = (DB.learningLog||[])
-    .filter(l=>l.traineeName===name)
+    .filter(l=>l.traineeName===name && l.checked)
     .sort((a,b)=>b.timestamp.localeCompare(a.timestamp));
 
   const logHtml = logEntries.length ? logEntries.map(l=>`
@@ -3264,7 +3264,6 @@ function renderAdminHistory(){
       <td>${l.date}</td>
       <td>${l.stationName}</td>
       <td>${l.itemText}</td>
-      <td>${l.checked ? '<span style="color:var(--primary-dk);">✓ 完成</span>' : '<span style="color:var(--ink-soft);">已取消</span>'}</td>
       <td>${l.mentor || '（無自動配對紀錄）'}</td>
     </tr>`).join('') : '';
 
@@ -3275,8 +3274,8 @@ function renderAdminHistory(){
     <div class="subhead">詳細紀錄（依時間新到舊）</div>
     <div style="overflow-x:auto;">
       <table class="sched-table">
-        <thead><tr><th>日期</th><th>站別</th><th>項目</th><th>狀態</th><th>當時導師</th></tr></thead>
-        <tbody>${logHtml || '<tr><td colspan="5" style="color:var(--ink-soft);padding:14px 4px;">尚無紀錄</td></tr>'}</tbody>
+        <thead><tr><th>日期</th><th>站別</th><th>項目</th><th>當時導師</th></tr></thead>
+        <tbody>${logHtml || '<tr><td colspan="4" style="color:var(--ink-soft);padding:14px 4px;">尚無紀錄</td></tr>'}</tbody>
       </table>
     </div>
   `;
