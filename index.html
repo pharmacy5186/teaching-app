@@ -316,8 +316,11 @@ p.page-sub{margin:0 0 16px;color:var(--ink-soft);font-size:13px;}
 .mini-edit{background:none;border:none;color:var(--primary);cursor:pointer;font-size:12px;padding:2px 4px;font-weight:700;}
 .subhead{font-size:12.5px;font-weight:700;color:var(--ink-soft);margin:16px 0 8px;text-transform:uppercase;letter-spacing:.03em;}
 table.sched-table{width:100%;border-collapse:collapse;font-size:12px;}
-table.sched-table th{text-align:left;color:var(--ink-soft);font-weight:700;padding:6px 4px;border-bottom:1px solid var(--line);font-size:11px;}
+table.sched-table th{text-align:left;color:var(--ink-soft);font-weight:700;padding:6px 4px;border-bottom:1px solid var(--line);font-size:11px;white-space:nowrap;}
 table.sched-table td{padding:8px 4px;border-bottom:1px solid var(--line);}
+table.sched-table td:first-child,table.sched-table th:first-child{white-space:nowrap;font-family:var(--font-mono);font-size:11px;}
+table.sched-table td:nth-child(2),table.sched-table th:nth-child(2){white-space:nowrap;}
+table.sched-table td:nth-child(4),table.sched-table th:nth-child(4){white-space:nowrap;}
 .csv-box{
   border:1.5px dashed var(--line);border-radius:var(--radius-md);padding:14px;text-align:center;background:var(--bg);margin-bottom:12px;
 }
