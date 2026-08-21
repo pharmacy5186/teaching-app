@@ -2561,12 +2561,13 @@ function renderStationDetail(){
     const items = cat.items.map(item=>{
       const isChecked = checked.includes(item.id);
       const hasDetail = !!item.detail;
+      const previewSections = hasDetail ? migrateDetailToSections(item.detail) : [];
       return `
       <div class="check-row ${isChecked?'checked':''} ${item.important?'important':''}">
         <input type="checkbox" ${isChecked?'checked':''} onclick="event.stopPropagation();toggleItem('${st.id}','${item.id}')">
         <div class="txt" onclick="${hasDetail?`openItemModal('${st.id}','${item.id}')`:`toggleItem('${st.id}','${item.id}')`}">
           <div class="line">${item.text}${hasDetail?'<span class="info-dot">i</span>':''}</div>
-          ${item.important && item.detail && item.detail.summary ? `<div class="note">* 最重要！${item.detail.summary}</div>` : (item.important ? `<div class="note">* 最重要項目</div>`:'')}
+          ${item.important && previewSections.length && previewSections[0].title ? `<div class="note">* 最重要！${previewSections[0].title}</div>` : (item.important ? `<div class="note">* 最重要項目</div>`:'')}
         </div>
       </div>`;
     }).join('');
@@ -2617,15 +2618,19 @@ function openItemModal(stationId, itemId){
   const item = st.categories.flatMap(c=>c.items).find(i=>i.id===itemId);
   if(!item || !item.detail) return;
   const d = item.detail;
+  const sections = migrateDetailToSections(d);
+  const sectionsHtml = sections.map(s=>`
+    ${s.title ? `<div class="modal-summary">⚠ ${s.title}</div>` : ''}
+    ${s.text ? `<p style="font-size:13px;line-height:1.7;color:var(--ink);white-space:pre-line;margin:0 0 14px;">${s.text}</p>` : ''}
+  `).join('');
   openModal(`
     <div class="modal-top">
       <h4>${item.text}</h4>
       <button class="modal-close" onclick="closeModal()">✕</button>
     </div>
-    ${d.summary?`<div class="modal-summary">⚠ ${d.summary}</div>`:''}
+    ${sectionsHtml}
     ${d.image?`<img class="modal-img" src="${d.image}" alt="教學圖示"><div class="modal-img-cap">教學圖解示範</div>`:''}
-    ${renderViewerAttachments(d.attachments, ()=>openItemModal(stationId, itemId))}
-    ${d.steps && d.steps.length ? `<ol class="modal-steps">${d.steps.map(s=>`<li>${s}</li>`).join('')}</ol>` : ''}
+    ${renderViewerAttachments(d.attachments)}
     <button class="btn btn-primary btn-block" onclick="closeModal()">我知道了</button>
   `);
 }
@@ -2861,19 +2866,48 @@ async function deleteItem(stId, catId, itemId){
   cat.items = cat.items.filter(i=>i.id!==itemId);
   await persist(); renderApp();
 }
-function editItem(stId, catId, itemId){
+function migrateDetailToSections(d){
+  if(!d) return [];
+  if(d.sections && d.sections.length) return d.sections.map(s=>({title:s.title||'', text:s.text||''}));
+  const legacyText = (d.steps||[]).join('\n');
+  if(d.summary || legacyText) return [{title:d.summary||'', text:legacyText}];
+  return [];
+}
+function renderItemSectionsEditor(sections, stId, catId, itemId){
+  if(!sections.length) return '<p style="font-size:11.5px;color:var(--ink-soft);margin:0 0 8px;">尚未新增任何提醒事項。</p>';
+  return sections.map((s,i)=>`
+    <div class="card" style="padding:12px;margin-bottom:8px;background:var(--bg);">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+        <b style="font-size:12px;color:var(--ink-soft);">提醒事項 ${i+1}</b>
+        <button type="button" class="mini-x" onclick="removeItemSectionAt('${stId}','${catId}','${itemId}',${i})">✕ 刪除</button>
+      </div>
+      <div class="form-group" style="margin-bottom:6px;"><label>標題（紅字顯示）</label><input type="text" class="section-title-input" data-idx="${i}" value="${s.title||''}"></div>
+      <div class="form-group" style="margin-bottom:0;"><label>說明內容</label><textarea class="section-text-input" data-idx="${i}">${s.text||''}</textarea></div>
+    </div>`).join('');
+}
+function readSectionsFromModal(){
+  const titles = Array.from(document.querySelectorAll('.section-title-input'));
+  const texts = Array.from(document.querySelectorAll('.section-text-input'));
+  return titles.map((t,i)=>({title:t.value.trim(), text:(texts[i]?texts[i].value.trim():'')})).filter(s=>s.title || s.text);
+}
+
+let editingItemSections = [];
+
+function editItem(stId, catId, itemId, sectionsOverride){
   const st = findStation(stId);
   const cat = st.categories.find(c=>c.id===catId);
   const item = cat.items.find(i=>i.id===itemId);
-  const d = item.detail || {summary:'', steps:[], image:'', attachments:[]};
+  const d = item.detail || {image:'', attachments:[]};
+  editingItemSections = sectionsOverride || migrateDetailToSections(item.detail);
   openModal(`
     <div class="modal-top"><h4>編輯檢核項目</h4><button class="modal-close" onclick="closeModal()">✕</button></div>
     <div class="form-group"><label>項目文字</label><input type="text" id="edit-item-text" value="${item.text}"></div>
     <div class="chk-inline"><input type="checkbox" id="edit-item-important" ${item.important?'checked':''}><label for="edit-item-important" style="margin:0;font-weight:400;">標記為最重要項目</label></div>
     <div class="chk-inline"><input type="checkbox" id="edit-item-hasdetail" ${item.detail?'checked':''} onchange="document.getElementById('detail-fields').style.display=this.checked?'block':'none'"><label for="edit-item-hasdetail" style="margin:0;font-weight:400;">此項目有特殊教學內容（點文字彈出小視窗）</label></div>
     <div id="detail-fields" style="display:${item.detail?'block':'none'};border-top:1px dashed var(--line);padding-top:10px;">
-      <div class="form-group"><label>提醒摘要（紅字顯示）</label><input type="text" id="edit-item-summary" value="${d.summary||''}"></div>
-      <div class="form-group"><label>教學步驟（每行一項）</label><textarea id="edit-item-steps">${(d.steps||[]).join('\n')}</textarea></div>
+      <div class="subhead" style="margin-top:0;">提醒事項</div>
+      <div id="item-sections-container">${renderItemSectionsEditor(editingItemSections, stId, catId, itemId)}</div>
+      <button type="button" class="btn btn-outline btn-block" style="margin-bottom:14px;" onclick="addItemSection('${stId}','${catId}','${itemId}')">＋ 新增提醒事項</button>
       <div class="form-group"><label>圖片網址（選填，也可用下方上傳檔案）</label><input type="text" id="edit-item-image" value="${d.image||''}"></div>
       <div class="subhead" style="margin-top:6px;">教材附件（圖片／PDF／Word）</div>
       ${renderAdminAttachmentChips(d.attachments, `removeItemAttachment('${stId}','${catId}','${itemId}',`)}
@@ -2884,13 +2918,22 @@ function editItem(stId, catId, itemId){
     <button class="btn btn-primary btn-block" style="margin-top:8px;" onclick="saveItem('${stId}','${catId}','${itemId}')">儲存</button>
   `);
 }
+function addItemSection(stId, catId, itemId){
+  const current = readSectionsFromModal();
+  current.push({title:'', text:''});
+  editItem(stId, catId, itemId, current);
+}
+function removeItemSectionAt(stId, catId, itemId, idx){
+  const current = readSectionsFromModal();
+  current.splice(idx,1);
+  editItem(stId, catId, itemId, current);
+}
 function captureItemModalFields(){
   return {
     text: document.getElementById('edit-item-text').value.trim(),
     important: document.getElementById('edit-item-important').checked,
     hasDetail: document.getElementById('edit-item-hasdetail').checked,
-    summary: document.getElementById('edit-item-summary') ? document.getElementById('edit-item-summary').value.trim() : '',
-    steps: document.getElementById('edit-item-steps') ? document.getElementById('edit-item-steps').value.split('\n').map(s=>s.trim()).filter(Boolean) : [],
+    sections: readSectionsFromModal(),
     image: document.getElementById('edit-item-image') ? document.getElementById('edit-item-image').value.trim() : '',
   };
 }
@@ -2903,7 +2946,7 @@ async function saveItem(stId, catId, itemId){
   item.important = f.important;
   if(f.hasDetail){
     const prevAttachments = (item.detail && item.detail.attachments) || [];
-    item.detail = { summary:f.summary, steps:f.steps, image:f.image, attachments:prevAttachments };
+    item.detail = { sections:f.sections, image:f.image, attachments:prevAttachments };
   }else{
     item.detail = null;
   }
@@ -2920,7 +2963,7 @@ async function uploadItemAttachments(stId, catId, itemId){
   const prevAttachments = (item.detail && item.detail.attachments) || [];
   item.text = f.text || item.text;
   item.important = f.important;
-  item.detail = { summary:f.summary, steps:f.steps, image:f.image, attachments:prevAttachments };
+  item.detail = { sections:f.sections, image:f.image, attachments:prevAttachments };
   const newAtts = [];
   for(const file of files){
     if(file.size > MAX_ATTACHMENT_BYTES){ showToast(`${file.name} 超過 ${humanFileSize(MAX_ATTACHMENT_BYTES)}，已略過`); continue; }
@@ -2929,7 +2972,7 @@ async function uploadItemAttachments(stId, catId, itemId){
   }
   item.detail.attachments = prevAttachments.concat(newAtts);
   await persist();
-  editItem(stId, catId, itemId);
+  editItem(stId, catId, itemId, f.sections);
   showToast(`已上傳 ${newAtts.length} 個檔案`);
 }
 async function removeItemAttachment(stId, catId, itemId, attId){
@@ -2940,9 +2983,9 @@ async function removeItemAttachment(stId, catId, itemId, attId){
   item.text = f.text || item.text;
   item.important = f.important;
   const prevAttachments = ((item.detail && item.detail.attachments) || []).filter(a=>a.id!==attId);
-  item.detail = { summary:f.summary, steps:f.steps, image:f.image, attachments:prevAttachments };
+  item.detail = { sections:f.sections, image:f.image, attachments:prevAttachments };
   await persist();
-  editItem(stId, catId, itemId);
+  editItem(stId, catId, itemId, f.sections);
 }
 
 /* =========================================================
@@ -3183,13 +3226,39 @@ function renderApp(){
 /* =========================================================
    INIT
    ========================================================= */
+function withTimeout(promise, ms, label){
+  return Promise.race([
+    promise,
+    new Promise((_,reject)=>setTimeout(()=>reject(new Error(`${label} 逾時（超過 ${ms/1000} 秒無回應）`)), ms))
+  ]);
+}
+function showFatalError(title, detail){
+  document.getElementById('app').innerHTML = `
+    <div style="max-width:480px;margin:40px auto;padding:20px;font-family:sans-serif;">
+      <div style="background:#FBE4DF;border:1px solid #C0432F;border-radius:12px;padding:18px 20px;color:#7A241A;">
+        <b style="font-size:15px;">⚠ ${title}</b>
+        <p style="font-size:13px;line-height:1.6;margin:10px 0 0;white-space:pre-wrap;">${detail}</p>
+        <p style="font-size:11.5px;margin:14px 0 0;color:#8A3A2C;">提示：如果是用滑鼠雙擊直接開啟這個檔案（網址列開頭是 file:///），請改成部署到網站上（例如 GitHub Pages）後用 https:// 網址開啟再試一次。</p>
+      </div>
+    </div>`;
+}
+
 (async function init(){
   document.getElementById('app').innerHTML = '<div style="padding:40px;text-align:center;color:#5B6B65;font-family:sans-serif;">載入中...</div>';
-  initScheduleFirebase();
-  await loadDB();
-  const dow = new Date().getDay();
-  S.stationsTab = dow===6 ? 'sat' : (dow===0 ? 'sun' : 'weekday');
-  renderApp();
+  try{
+    if(typeof firebase === 'undefined'){
+      showFatalError('Firebase 程式庫載入失敗', 'firebase-app-compat.js 等外部程式庫沒有成功載入，可能是網路連線問題，或瀏覽器/防火牆擋住了 gstatic.com。請檢查網路連線後重新整理頁面。');
+      return;
+    }
+    try{ initScheduleFirebase(); }catch(e){ console.error('班表系統連線初始化失敗（不影響主要功能）', e); }
+    await withTimeout(loadDB(), 12000, '資料庫連線');
+    const dow = new Date().getDay();
+    S.stationsTab = dow===6 ? 'sat' : (dow===0 ? 'sun' : 'weekday');
+    renderApp();
+  }catch(e){
+    console.error('App 初始化失敗', e);
+    showFatalError('載入失敗', '錯誤訊息：' + (e && e.message ? e.message : String(e)));
+  }
 })();
 </script>
 </body>
