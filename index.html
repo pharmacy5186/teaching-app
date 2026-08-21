@@ -2333,6 +2333,11 @@ function percentDone(station, traineeName){ if(!traineeName) return 0; const t=t
 
 async function toggleItem(stationId, itemId, traineeName){
   if(!traineeName){ showToast('請先選擇要記錄進度的學員'); return; }
+  const user = currentUser();
+  if(!(user && user.role==='trainee' && user.name===traineeName)){
+    showToast('只有學員本人登入後才能勾選檢核項目');
+    return;
+  }
   const key = progressKey(stationId, traineeName);
   const arr = DB.progress[key] ? DB.progress[key].slice() : [];
   const idx = arr.indexOf(itemId);
@@ -2565,21 +2570,18 @@ function renderStationDetail(){
   const todayMatch = findAnyStaffForStation(st.id, todayStr());
   const mentorName = todayMatch ? todayMatch.name : '尚未安排';
   const shiftLabel = todayMatch ? `今日班別（${todayMatch.code}）` : '無班表';
+  const user = currentUser();
+  const canCheck = !!(traineeName && user && user.role==='trainee' && user.name===traineeName);
 
   const stationOptions = ['weekday','sat','sun'].map(dt=>{
     const opts = DB.stations.filter(s=>(s.dayType||'weekday')===dt).map(s=>`<option value="${s.id}" ${s.id===st.id?'selected':''}>${s.emoji} ${s.name}（${s.code}）</option>`).join('');
     return opts ? `<optgroup label="${DAYTYPE_LABEL[dt]}">${opts}</optgroup>` : '';
   }).join('');
 
-  const traineeOptions = DB.employees.filter(e=>e.role==='trainee').map(e=>`<option value="${escAttr(e.name)}" ${e.name===traineeName?'selected':''}>${e.name}</option>`).join('');
-  const traineePicker = `
-    <div class="hint-banner" style="background:var(--sky);color:#1B4E78;">
-      👤 目前記錄進度的學員：
-      <select onchange="setProgressTrainee(this.value)" style="margin-left:6px;border:1px solid #1B4E78;border-radius:100px;padding:3px 8px;background:#fff;color:#1B4E78;font-size:12px;">
-        <option value="">請選擇學員</option>
-        ${traineeOptions}
-      </select>
-    </div>`;
+  const readonlyBanner = (traineeName && !canCheck) ? `
+    <div class="hint-banner" style="background:var(--peach);color:#8B4A20;">
+      🔒 唯讀模式：只有「${traineeName}」本人登入後才能勾選這些項目，其他人只能查看進度。
+    </div>` : '';
 
   const tpCards = st.teachingPoints.map(tp=>`
     <div class="tp-card" style="border-left-color:${c.hex}">
@@ -2592,10 +2594,16 @@ function renderStationDetail(){
       const isChecked = checked.includes(item.id);
       const hasDetail = !!item.detail;
       const previewSections = hasDetail ? migrateDetailToSections(item.detail) : [];
+      const checkboxAttrs = canCheck
+        ? `onclick="event.stopPropagation();toggleItem('${st.id}','${item.id}','${traineeName||''}')"`
+        : `disabled title="只有學員本人可以勾選"`;
+      const rowClickAction = hasDetail
+        ? `openItemModal('${st.id}','${item.id}')`
+        : (canCheck ? `toggleItem('${st.id}','${item.id}','${traineeName||''}')` : '');
       return `
       <div class="check-row ${isChecked?'checked':''} ${item.important?'important':''}">
-        <input type="checkbox" ${isChecked?'checked':''} onclick="event.stopPropagation();toggleItem('${st.id}','${item.id}','${traineeName||''}')">
-        <div class="txt" onclick="${hasDetail?`openItemModal('${st.id}','${item.id}')`:`toggleItem('${st.id}','${item.id}','${traineeName||''}')`}">
+        <input type="checkbox" ${isChecked?'checked':''} ${checkboxAttrs}>
+        <div class="txt" ${rowClickAction ? `onclick="${rowClickAction}"` : ''} style="${!hasDetail && !canCheck ? 'cursor:default;' : ''}">
           <div class="line">${item.text}${hasDetail?'<span class="info-dot">i</span>':''}</div>
           ${item.important && previewSections.length && previewSections[0].title ? `<div class="note">* 最重要！${previewSections[0].title}</div>` : (item.important ? `<div class="note">* 最重要項目</div>`:'')}
         </div>
@@ -2623,7 +2631,7 @@ function renderStationDetail(){
       <div class="progress-label"><span>教學完成度${traineeName?`（${traineeName}）`:''}</span><span>${pct}%（${checkedCount(st, traineeName)}/${totalItems(st)}）</span></div>
     </div>
 
-    ${traineeName ? '' : traineePicker}
+    ${traineeName ? readonlyBanner : ''}
 
     <div class="block-title">📖 務必教學重點</div>
     ${tpCards || '<p style="font-size:12.5px;color:var(--ink-soft);">尚未設定教學重點，請至後台新增。</p>'}
@@ -2632,12 +2640,8 @@ function renderStationDetail(){
     <div class="hint-banner">💡 請老師確認學生了解後再勾選；項目文字旁有「i」標記者，點擊文字可查看教學小視窗。勾選進度會持續累積，不會每天重置，可以分好幾天完成。</div>
     ${catBlocks || '<p style="font-size:12.5px;color:var(--ink-soft);">尚未設定檢核表，請至後台新增。</p>'}
 
-    ${traineeName ? `<div class="reset-row"><button onclick="resetStationProgress('${st.id}','${traineeName}')">重新開始「${traineeName}」在本站的檢核進度</button></div>` : ''}
+    ${canCheck ? `<div class="reset-row"><button onclick="resetStationProgress('${st.id}','${traineeName}')">重新開始「${traineeName}」在本站的檢核進度</button></div>` : ''}
   </div>`;
-}
-function setProgressTrainee(name){
-  S.progressTraineeName = name || null;
-  renderApp();
 }
 
 async function resetStationProgress(stationId, traineeName){
@@ -2651,16 +2655,16 @@ async function resetStationProgress(stationId, traineeName){
 function openStation(id, traineeName){
   S.stationId=id;
   const user = currentUser();
-  if(traineeName){
-    S.progressTraineeName = traineeName;
-  }else if(user && user.role==='trainee'){
+  if(user && user.role==='trainee'){
+    // 學員本人永遠只綁定自己的進度，不受任何傳入參數影響
     S.progressTraineeName = user.name;
+  }else if(traineeName){
+    S.progressTraineeName = traineeName;
   }else{
     S.progressTraineeName = null;
   }
   S.view='station-detail'; renderApp(); window.scrollTo(0,0);
 }
-
 async function openItemModal(stationId, itemId){
   const st = findStation(stationId);
   const item = st.categories.flatMap(c=>c.items).find(i=>i.id===itemId);
