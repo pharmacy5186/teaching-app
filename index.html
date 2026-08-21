@@ -2246,7 +2246,10 @@ function findStation(id){ return DB.stations.find(s=>s.id===id); }
    ========================================================= */
 function findEmployeeByEmpNo(empNo){ return DB.employees.find(e=>e.empNo===String(empNo).trim()); }
 function findEmployeeByName(name){ return DB.employees.find(e=>e.name===String(name).trim()); }
-function currentUser(){ return DB.currentUserId ? DB.employees.find(e=>e.id===DB.currentUserId) : null; }
+// 登入狀態只存在這次瀏覽器記憶體裡（sessionUserId），不寫進 Firestore，
+// 所以重新整理頁面或關掉分頁後，一定要重新輸入員編登入。
+let sessionUserId = null;
+function currentUser(){ return sessionUserId ? DB.employees.find(e=>e.id===sessionUserId) : null; }
 function stripCodeSuffix(v){ return String(v||'').trim().split(/[\/#]/)[0].trim(); }
 function getRosterCode(date, name){
   const entry = DB.roster.find(r=>r.date===date && r.name===name);
@@ -2799,7 +2802,8 @@ function editTeachingPoint(stId, tpId){
     ${renderAdminAttachmentChips(tp.attachments, `removeTpAttachment('${stId}','${tpId}',`)}
     <input type="file" id="tp-att-input" accept="image/*,.pdf,.doc,.docx" multiple style="width:100%;margin-bottom:6px;">
     <p style="font-size:11px;color:var(--ink-soft);margin:0 0 8px;">單檔建議 3.5MB 以內；Word（.docx）會自動轉換為可預覽內容。</p>
-    <button class="btn btn-ghost btn-block" style="margin-bottom:14px;" onclick="uploadTpAttachments('${stId}','${tpId}')">上傳選取的檔案</button>
+    <button class="btn btn-ghost btn-block" style="margin-bottom:6px;" onclick="uploadTpAttachments('${stId}','${tpId}')">上傳選取的檔案</button>
+    <div id="tp-att-status" style="margin-bottom:10px;"></div>
     <button class="btn btn-primary btn-block" onclick="saveTeachingPoint('${stId}','${tpId}')">儲存</button>
   `);
 }
@@ -2819,24 +2823,33 @@ async function saveTeachingPoint(stId, tpId){
   tp.image = f.image;
   await persist(); closeModal(); showToast('已儲存教學重點');
 }
+function setUploadStatus(elId, html){
+  const el = document.getElementById(elId);
+  if(el) el.innerHTML = html;
+}
 async function uploadTpAttachments(stId, tpId){
   const input = document.getElementById('tp-att-input');
   const files = Array.from((input && input.files) || []);
-  if(!files.length){ showToast('請先選擇檔案'); return; }
+  if(!files.length){ setUploadStatus('tp-att-status', '<p style="color:var(--danger);font-size:11.5px;">請先選擇檔案</p>'); return; }
+  setUploadStatus('tp-att-status', '<p style="color:var(--ink-soft);font-size:11.5px;">上傳中，請稍候…</p>');
   const st = findStation(stId);
   const tp = st.teachingPoints.find(t=>t.id===tpId);
   const f = captureTpModalFields();
   tp.title = f.title || tp.title; tp.bullets = f.bullets; tp.image = f.image;
   const newAtts = [];
+  const errors = [];
   for(const file of files){
-    if(file.size > MAX_ATTACHMENT_BYTES){ showToast(`${file.name} 超過 ${humanFileSize(MAX_ATTACHMENT_BYTES)}，已略過`); continue; }
+    if(file.size > MAX_ATTACHMENT_BYTES){ errors.push(`${file.name} 超過 ${humanFileSize(MAX_ATTACHMENT_BYTES)}`); continue; }
     try{ newAtts.push(await processUploadedFile(file)); }
-    catch(e){ console.error(e); showToast(`${file.name} 無法處理，已略過`); }
+    catch(e){ console.error(e); errors.push(`${file.name} 上傳失敗：${e.message||e}`); }
   }
   tp.attachments = (tp.attachments||[]).concat(newAtts);
   await persist();
   editTeachingPoint(stId, tpId);
-  showToast(`已上傳 ${newAtts.length} 個檔案`);
+  const summary = errors.length
+    ? `<p style="color:var(--danger);font-size:11.5px;">已上傳 ${newAtts.length} 個檔案；失敗：${errors.join('；')}</p>`
+    : `<p style="color:var(--primary-dk);font-size:11.5px;">✓ 已上傳 ${newAtts.length} 個檔案</p>`;
+  setUploadStatus('tp-att-status', summary);
 }
 async function removeTpAttachment(stId, tpId, attId){
   const st = findStation(stId);
@@ -2897,19 +2910,17 @@ function renderItemSectionsEditor(sections, stId, catId, itemId){
       ${renderAdminAttachmentChips(s.attachments, `removeSectionAttachment('${stId}','${catId}','${itemId}',${i},`)}
       <input type="file" id="section-att-input-${i}" accept="image/*,.pdf,.doc,.docx" multiple style="width:100%;margin-bottom:6px;">
       <button type="button" class="btn btn-ghost btn-sm btn-block" onclick="uploadSectionAttachments('${stId}','${catId}','${itemId}',${i})">上傳此項附件</button>
+      <div id="section-att-status-${i}" style="margin-top:4px;"></div>
     </div>`).join('');
 }
 function readSectionsFromModal(){
   const titles = Array.from(document.querySelectorAll('.section-title-input'));
   const texts = Array.from(document.querySelectorAll('.section-text-input'));
-  // 注意：這裡刻意不過濾掉「標題/說明還是空白」的項目，
-  // 否則使用者還沒打字、只是想先上傳附件時，索引對不齊會導致附件上傳失敗或跑錯項目。
-  // 真正的清理（丟掉完全空白的項目）只在 saveItem() 最終儲存時才做。
   return titles.map((t,i)=>({
     title: t.value.trim(),
     text: (texts[i]?texts[i].value.trim():''),
     attachments: (editingItemSections[i] && editingItemSections[i].attachments) || []
-  }));
+  })).filter(s=>s.title || s.text || (s.attachments && s.attachments.length));
 }
 
 let editingItemSections = [];
@@ -2935,6 +2946,7 @@ function editItem(stId, catId, itemId, sectionsOverride){
       <input type="file" id="item-att-input" accept="image/*,.pdf,.doc,.docx" multiple style="width:100%;margin-bottom:6px;">
       <p style="font-size:11px;color:var(--ink-soft);margin:0 0 8px;">單檔建議 3.5MB 以內；Word（.docx）會自動轉換為可預覽內容。</p>
       <button type="button" class="btn btn-ghost btn-block" style="margin-bottom:6px;" onclick="uploadItemAttachments('${stId}','${catId}','${itemId}')">上傳選取的檔案</button>
+      <div id="item-att-status"></div>
     </div>
     <button class="btn btn-primary btn-block" style="margin-top:8px;" onclick="saveItem('${stId}','${catId}','${itemId}')">儲存</button>
   `);
@@ -2952,18 +2964,24 @@ function removeItemSectionAt(stId, catId, itemId, idx){
 async function uploadSectionAttachments(stId, catId, itemId, sectionIdx){
   const input = document.getElementById('section-att-input-'+sectionIdx);
   const files = Array.from((input && input.files) || []);
-  if(!files.length){ showToast('請先選擇檔案'); return; }
+  const statusId = 'section-att-status-'+sectionIdx;
+  if(!files.length){ setUploadStatus(statusId, '<p style="color:var(--danger);font-size:11px;">請先選擇檔案</p>'); return; }
+  setUploadStatus(statusId, '<p style="color:var(--ink-soft);font-size:11px;">上傳中，請稍候…</p>');
   const current = readSectionsFromModal();
-  if(!current[sectionIdx]){ showToast('請先填寫此提醒事項的標題或說明再上傳'); return; }
+  if(!current[sectionIdx]){ setUploadStatus(statusId, '<p style="color:var(--danger);font-size:11px;">請先填寫此提醒事項的標題或說明再上傳</p>'); return; }
   const newAtts = [];
+  const errors = [];
   for(const file of files){
-    if(file.size > MAX_ATTACHMENT_BYTES){ showToast(`${file.name} 超過 ${humanFileSize(MAX_ATTACHMENT_BYTES)}，已略過`); continue; }
+    if(file.size > MAX_ATTACHMENT_BYTES){ errors.push(`${file.name} 超過 ${humanFileSize(MAX_ATTACHMENT_BYTES)}`); continue; }
     try{ newAtts.push(await processUploadedFile(file)); }
-    catch(e){ console.error(e); showToast(`${file.name} 無法處理，已略過`); }
+    catch(e){ console.error(e); errors.push(`${file.name} 上傳失敗：${e.message||e}`); }
   }
   current[sectionIdx].attachments = (current[sectionIdx].attachments||[]).concat(newAtts);
   editItem(stId, catId, itemId, current);
-  showToast(`已上傳 ${newAtts.length} 個檔案`);
+  const summary = errors.length
+    ? `<p style="color:var(--danger);font-size:11px;">已上傳 ${newAtts.length} 個；失敗：${errors.join('；')}</p>`
+    : `<p style="color:var(--primary-dk);font-size:11px;">✓ 已上傳 ${newAtts.length} 個檔案</p>`;
+  setUploadStatus(statusId, summary);
 }
 async function removeSectionAttachment(stId, catId, itemId, sectionIdx, attId){
   const current = readSectionsFromModal();
@@ -2987,11 +3005,9 @@ async function saveItem(stId, catId, itemId){
   const f = captureItemModalFields();
   item.text = f.text || item.text;
   item.important = f.important;
-  // 最終儲存時才清掉完全空白（沒標題、沒說明、也沒附件）的提醒事項
-  const cleanSections = f.sections.filter(s=>s.title || s.text || (s.attachments && s.attachments.length));
   if(f.hasDetail){
     const prevAttachments = (item.detail && item.detail.attachments) || [];
-    item.detail = { sections:cleanSections, image:f.image, attachments:prevAttachments };
+    item.detail = { sections:f.sections, image:f.image, attachments:prevAttachments };
   }else{
     item.detail = null;
   }
@@ -3000,7 +3016,8 @@ async function saveItem(stId, catId, itemId){
 async function uploadItemAttachments(stId, catId, itemId){
   const input = document.getElementById('item-att-input');
   const files = Array.from((input && input.files) || []);
-  if(!files.length){ showToast('請先選擇檔案'); return; }
+  if(!files.length){ setUploadStatus('item-att-status', '<p style="color:var(--danger);font-size:11.5px;">請先選擇檔案</p>'); return; }
+  setUploadStatus('item-att-status', '<p style="color:var(--ink-soft);font-size:11.5px;">上傳中，請稍候…</p>');
   const st = findStation(stId);
   const cat = st.categories.find(c=>c.id===catId);
   const item = cat.items.find(i=>i.id===itemId);
@@ -3010,15 +3027,19 @@ async function uploadItemAttachments(stId, catId, itemId){
   item.important = f.important;
   item.detail = { sections:f.sections, image:f.image, attachments:prevAttachments };
   const newAtts = [];
+  const errors = [];
   for(const file of files){
-    if(file.size > MAX_ATTACHMENT_BYTES){ showToast(`${file.name} 超過 ${humanFileSize(MAX_ATTACHMENT_BYTES)}，已略過`); continue; }
+    if(file.size > MAX_ATTACHMENT_BYTES){ errors.push(`${file.name} 超過 ${humanFileSize(MAX_ATTACHMENT_BYTES)}`); continue; }
     try{ newAtts.push(await processUploadedFile(file)); }
-    catch(e){ console.error(e); showToast(`${file.name} 無法處理，已略過`); }
+    catch(e){ console.error(e); errors.push(`${file.name} 上傳失敗：${e.message||e}`); }
   }
   item.detail.attachments = prevAttachments.concat(newAtts);
   await persist();
   editItem(stId, catId, itemId, f.sections);
-  showToast(`已上傳 ${newAtts.length} 個檔案`);
+  const summary = errors.length
+    ? `<p style="color:var(--danger);font-size:11.5px;">已上傳 ${newAtts.length} 個檔案；失敗：${errors.join('；')}</p>`
+    : `<p style="color:var(--primary-dk);font-size:11.5px;">✓ 已上傳 ${newAtts.length} 個檔案</p>`;
+  setUploadStatus('item-att-status', summary);
 }
 async function removeItemAttachment(stId, catId, itemId, attId){
   const st = findStation(stId);
@@ -3099,7 +3120,7 @@ async function updateEmployeeRole(id, role){
 }
 async function deleteEmployee(id){
   DB.employees = DB.employees.filter(e=>e.id!==id);
-  if(DB.currentUserId===id) DB.currentUserId=null;
+  if(sessionUserId===id) sessionUserId=null;
   await persist(); renderApp();
 }
 async function addCodeMap(){
@@ -3179,14 +3200,12 @@ async function doLogin(){
   let emp = findEmployeeByEmpNo(candidate) || findEmployeeByEmpNo(raw) || findEmployeeByEmpNo(digits);
   if(!emp){ loginError='查無此員編，請確認後再試一次'; renderApp(); return; }
   loginError='';
-  DB.currentUserId = emp.id;
+  sessionUserId = emp.id; // 只存在記憶體裡，不寫進資料庫
   S.view = 'today';
-  await persist();
   renderApp();
 }
 async function doLogout(){
-  DB.currentUserId = null;
-  await persist();
+  sessionUserId = null;
   renderApp();
 }
 
