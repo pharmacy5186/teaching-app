@@ -3195,7 +3195,7 @@ function renderAdminPeople(){
     <div class="subhead">後台管理密碼</div>
     <p style="font-size:11.5px;color:var(--ink-soft);margin:0 0 10px;">進入「後台管理」需要輸入的密碼，改完立即生效。</p>
     <div class="card">
-      <div class="form-group"><label>新密碼</label><input type="text" id="new-admin-pw" placeholder="輸入新密碼"></div>
+      <div class="form-group"><label>新密碼（僅限數字）</label><input type="text" inputmode="numeric" pattern="[0-9]*" id="new-admin-pw" oninput="this.value=this.value.replace(/[^0-9]/g,'')" placeholder="輸入新密碼"></div>
       <button class="btn btn-primary btn-block" onclick="updateAdminPassword()">更新密碼</button>
     </div>
   `;
@@ -3330,7 +3330,7 @@ function renderAdminLock(){
       <div class="rx-mark" style="width:52px;height:52px;font-size:26px;margin:0 auto 24px;">🔒</div>
       <div style="max-width:300px;margin:0 auto;">
         <label class="login-field-label">後台管理密碼</label>
-        <input type="password" id="admin-pw-input" class="login-id-input" style="text-align:left;font-size:16px;letter-spacing:normal;font-family:var(--font-body);" onkeydown="if(event.key==='Enter')checkAdminPassword()" autofocus>
+        <input type="password" inputmode="numeric" pattern="[0-9]*" id="admin-pw-input" class="login-id-input" style="text-align:left;font-size:16px;letter-spacing:normal;font-family:var(--font-body);" oninput="this.value=this.value.replace(/[^0-9]/g,'')" onkeydown="if(event.key==='Enter')checkAdminPassword()" autofocus>
         ${adminPasswordError ? `<p style="color:var(--danger);font-size:12px;margin:10px 0 0;">${adminPasswordError}</p>` : ''}
         <button class="btn btn-primary btn-block" style="margin-top:16px;" onclick="checkAdminPassword()">進入後台</button>
         <button class="btn btn-outline btn-block" style="margin-top:8px;" onclick="route('today')">取消</button>
