@@ -2323,9 +2323,18 @@ function closeModal(){ modalHtml=''; renderApp(); }
 
 let toastMsg = '';
 function showToast(msg){
-  toastMsg = msg;
-  renderApp();
-  setTimeout(()=>{ toastMsg=''; renderApp(); }, 1800);
+  // 直接操作獨立的 toast 元素，不觸發整頁重繪，避免打斷使用者正在輸入的欄位（例如登入畫面）
+  let el = document.getElementById('global-toast');
+  if(!el){
+    el = document.createElement('div');
+    el.id = 'global-toast';
+    el.className = 'toast';
+    document.body.appendChild(el);
+  }
+  el.textContent = msg;
+  el.style.display = 'block';
+  clearTimeout(window.__toastTimer);
+  window.__toastTimer = setTimeout(()=>{ el.style.display = 'none'; }, 1800);
 }
 
 /* =========================================================
@@ -2893,11 +2902,14 @@ function renderItemSectionsEditor(sections, stId, catId, itemId){
 function readSectionsFromModal(){
   const titles = Array.from(document.querySelectorAll('.section-title-input'));
   const texts = Array.from(document.querySelectorAll('.section-text-input'));
+  // 注意：這裡刻意不過濾掉「標題/說明還是空白」的項目，
+  // 否則使用者還沒打字、只是想先上傳附件時，索引對不齊會導致附件上傳失敗或跑錯項目。
+  // 真正的清理（丟掉完全空白的項目）只在 saveItem() 最終儲存時才做。
   return titles.map((t,i)=>({
     title: t.value.trim(),
     text: (texts[i]?texts[i].value.trim():''),
     attachments: (editingItemSections[i] && editingItemSections[i].attachments) || []
-  })).filter(s=>s.title || s.text || (s.attachments && s.attachments.length));
+  }));
 }
 
 let editingItemSections = [];
@@ -2975,9 +2987,11 @@ async function saveItem(stId, catId, itemId){
   const f = captureItemModalFields();
   item.text = f.text || item.text;
   item.important = f.important;
+  // 最終儲存時才清掉完全空白（沒標題、沒說明、也沒附件）的提醒事項
+  const cleanSections = f.sections.filter(s=>s.title || s.text || (s.attachments && s.attachments.length));
   if(f.hasDetail){
     const prevAttachments = (item.detail && item.detail.attachments) || [];
-    item.detail = { sections:f.sections, image:f.image, attachments:prevAttachments };
+    item.detail = { sections:cleanSections, image:f.image, attachments:prevAttachments };
   }else{
     item.detail = null;
   }
