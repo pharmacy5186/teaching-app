@@ -248,7 +248,11 @@ p.page-sub{margin:0 0 16px;color:var(--ink-soft);font-size:13px;}
 }
 .check-row .txt{flex:1;cursor:pointer;}
 .check-row .txt .line{font-size:13px;line-height:1.45;white-space:pre-line;}
-.check-row.checked .line{color:var(--ink-soft);text-decoration:line-through;text-decoration-color:var(--line);}
+.check-row.checked{background:var(--mint);border-color:var(--primary);}
+.check-row.checked .line{color:var(--primary-dk);font-weight:600;}
+.check-row.checked .line::before{content:'✓ ';color:var(--primary);font-weight:700;}
+.check-row.locked{opacity:0.75;}
+.check-row.locked input[type=checkbox]{cursor:not-allowed;}
 .check-row .note{font-size:11px;color:var(--danger);margin-top:3px;font-weight:700;}
 .info-dot{
   display:inline-flex;align-items:center;justify-content:center;
@@ -277,6 +281,11 @@ p.page-sub{margin:0 0 16px;color:var(--ink-soft);font-size:13px;}
 .modal-close{background:var(--bg);border:none;width:30px;height:30px;border-radius:50%;font-size:15px;cursor:pointer;flex-shrink:0;color:var(--ink-soft);}
 .modal-summary{background:var(--danger-tint);color:var(--danger);padding:9px 12px;border-radius:var(--radius-sm);font-size:12.5px;font-weight:700;margin-bottom:12px;}
 .modal-steps{margin:0 0 14px;padding-left:20px;font-size:13px;line-height:1.75;color:var(--ink);}
+.docx-preview table{border-collapse:collapse;width:100%;margin:8px 0;}
+.docx-preview table td,.docx-preview table th{border:1px solid var(--line);padding:5px 7px;font-size:12px;}
+.docx-preview table th{background:var(--primary-tint);font-weight:700;}
+.docx-preview p{margin:0 0 8px;}
+.docx-preview img{max-width:100%;}
 .modal-img{width:100%;border-radius:var(--radius-md);margin-bottom:6px;display:block;background:var(--bg);}
 .modal-img-cap{font-size:11px;color:var(--ink-soft);text-align:center;margin-bottom:10px;}
 .pdf-viewer{margin-bottom:10px;}
@@ -381,6 +390,7 @@ table.sched-table td:nth-child(4),table.sched-table th:nth-child(4){white-space:
 </script>
 <script src="https://www.gstatic.com/firebasejs/10.7.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.7.0/firebase-firestore-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.7.0/firebase-auth-compat.js"></script>
 </head>
 <body>
 <div id="app"></div>
@@ -433,16 +443,23 @@ const scheduleFirebaseConfig = {
   appId: "1:779276168089:web:c57dfd4db57beef3804108",
   measurementId: "G-BVDVEYZEDT"
 };
+// 對方系統工程師提供的固定資料路徑（完全比照對方給的原始寫法組成路徑字串，避免自己猜錯集合/文件交錯方式）
+const SCHEDULE_DOC_PATH_PREFIX = 'artifacts/pharmacy-system-v1-8/public/data/roster/scheduleDirectory';
 let scheduleDbReady = false;
 let scheduleDb = null;
-function initScheduleFirebase(){
+let scheduleAuthReady = false;
+async function initScheduleFirebase(){
   try{
     const scheduleApp = firebase.initializeApp(scheduleFirebaseConfig, 'scheduleReadOnlyApp');
     scheduleDb = scheduleApp.firestore();
     scheduleDbReady = true;
+    // 對方規則要求連線先經過驗證身份，匿名登入即可符合，不需要真實帳密
+    const scheduleAuth = scheduleApp.auth();
+    await scheduleAuth.signInAnonymously();
+    scheduleAuthReady = true;
     return true;
   }catch(e){
-    console.error('班表系統 Firebase 初始化失敗', e);
+    console.error('班表系統 Firebase 初始化或匿名登入失敗', e);
     return false;
   }
 }
@@ -458,6 +475,49 @@ async function scheduleReadDoc(collectionName, docId){
   if(!scheduleDbReady) throw new Error('班表系統尚未連線');
   const doc = await scheduleDb.collection(collectionName).doc(docId).get();
   return doc.exists ? {id:doc.id, data:doc.data()} : null;
+}
+
+// ---- 真正的班表快照讀取（依對方提供的路徑規格） ----
+const scheduleMonthCache = {}; // monthKey -> {entries} | null，同一次頁面工作階段內快取，避免同一頁重複狂打 Firestore
+async function fetchScheduleMonth(monthKey, forceRefresh){
+  if(!forceRefresh && Object.prototype.hasOwnProperty.call(scheduleMonthCache, monthKey)){
+    return scheduleMonthCache[monthKey];
+  }
+  try{
+    if(!scheduleDbReady || !scheduleAuthReady){
+      const ok = await initScheduleFirebase();
+      if(!ok) throw new Error('班表系統連線失敗');
+    }
+    let ref = scheduleDb.doc(`${SCHEDULE_DOC_PATH_PREFIX}/${monthKey}`);
+    const snap = await ref.get();
+    const entries = snap.exists ? (snap.data().entries || {}) : null;
+    scheduleMonthCache[monthKey] = entries;
+    return entries;
+  }catch(e){
+    console.error('讀取班表快照失敗', e);
+    scheduleMonthCache[monthKey] = null;
+    return null;
+  }
+}
+function dateStrToMonthDayKey(dateStr){
+  const [y,m,d] = dateStr.split('-');
+  return { monthKey: `${y}-${m}`, dayKey: String(parseInt(d,10)) };
+}
+// 取出真正的班別代碼：如果代碼裡有括號（例如「加強週(V8)」），取括號內的內容作為實際比對用的代碼
+function extractRealCode(raw){
+  if(!raw) return raw;
+  const m = String(raw).match(/[（(]([^）)]+)[）)]/);
+  return m ? m[1].trim() : String(raw).trim();
+}
+// 查詢某位員工在某一天的班別代碼（原始代碼，未做括號/後綴處理）
+async function getShiftForEmployee(empNo, dateStr, forceRefresh){
+  if(!empNo) return null;
+  const {monthKey, dayKey} = dateStrToMonthDayKey(dateStr);
+  const entries = await fetchScheduleMonth(monthKey, forceRefresh);
+  if(!entries) return null;
+  const raw = entries[empNo] ? entries[empNo][dayKey] : undefined;
+  if(raw === undefined || raw === null || raw === '-') return null; // 空班/查無
+  return raw;
 }
 async function testScheduleRead(){
   const el = document.getElementById('sched-test-collection');
@@ -688,7 +748,7 @@ async function renderViewerAttachmentsAsync(attachments){
       return pdfSlideViewer(a, a.pages);
     }
     if(a.type==='docx' || a.type==='doc'){
-      const preview = a.html ? `<div style="border:1px solid var(--line);border-radius:var(--radius-sm);padding:10px 12px;max-height:320px;overflow-y:auto;font-size:12.5px;line-height:1.6;margin-bottom:8px;background:var(--bg);">${a.html}</div>` : '<p style="font-size:12px;color:var(--ink-soft);">此檔案無法預覽。</p>';
+      const preview = a.html ? `<div class="docx-preview" style="border:1px solid var(--line);border-radius:var(--radius-sm);padding:10px 12px;max-height:320px;overflow-y:auto;font-size:12.5px;line-height:1.6;margin-bottom:8px;background:var(--bg);">${a.html}</div>` : '<p style="font-size:12px;color:var(--ink-soft);">此檔案無法預覽。</p>';
       return preview;
     }
     return '';
@@ -2230,7 +2290,7 @@ function buildDefaultData(){
   const employees = employeeSeed.map(e => ({id:uid('emp'), empNo:e.empNo, name:e.name, role:e.role}));
   const roster = [];
 
-  return {stations, progress:{}, user:{name:'王小明', role:'實習生'}, employees, roster, codeMap, currentUserId:null, adminPassword:'0000', learningLog:[]};
+  return {stations, progress:{}, user:{name:'王小明', role:'實習生'}, employees, roster, codeMap, currentUserId:null, adminPassword:'0000', learningLog:[], progressLocks:{}};
 }
 
 
@@ -2262,6 +2322,7 @@ function migrateDB(){
   if(typeof DB.currentUserId === 'undefined') DB.currentUserId = null;
   if(!DB.adminPassword) DB.adminPassword = '0000';
   if(!DB.learningLog) DB.learningLog = [];
+  if(!DB.progressLocks) DB.progressLocks = {};
 }
 async function persist(){
   if(!firebaseReady){ firebaseConfigMissing = true; return; }
@@ -2275,7 +2336,7 @@ async function persist(){
 /* =========================================================
    狀態
    ========================================================= */
-const S = { view:'today', stationId:null, adminTab:'stations', editingStation:null, editingItem:null, stationsTab:'weekday', adminUnlocked:false, progressTraineeName:null, historyTraineeFilter:'' };
+const S = { view:'today', stationId:null, adminTab:'stations', editingStation:null, editingItem:null, stationsTab:'weekday', adminUnlocked:false, progressTraineeName:null, historyTraineeFilter:'', todayLoading:false, todayAuto:null, todayAutoTmr:null, todayMentoring:null, stationMentorMatch:null, stationMatchLoading:false };
 
 function findStation(id){ return DB.stations.find(s=>s.id===id); }
 
@@ -2289,39 +2350,60 @@ function findEmployeeByName(name){ return DB.employees.find(e=>e.name===String(n
 let sessionUserId = null;
 function currentUser(){ return sessionUserId ? DB.employees.find(e=>e.id===sessionUserId) : null; }
 function stripCodeSuffix(v){ return String(v||'').trim().split(/[\/#]/)[0].trim(); }
-function getRosterCode(date, name){
-  const entry = DB.roster.find(r=>r.date===date && r.name===name);
-  return entry ? stripCodeSuffix(entry.code) : null;
+// 正規化一個原始班別代碼：先去掉 / # 之類的後綴，再檢查有沒有括號（例如「加強週(V8)」），
+// 有的話取括號內的內容當作真正用來比對的代碼
+function normalizeCode(raw){
+  if(!raw) return null;
+  const stripped = stripCodeSuffix(raw);
+  return extractRealCode(stripped) || null;
 }
 function resolveStationForCode(code){
   if(!code) return null;
   const m = DB.codeMap.find(c=>c.code===code);
   return m ? findStation(m.stationId) : null;
 }
-function findMentorForCode(date, code, excludeName){
-  const candidates = DB.roster.filter(r=>r.date===date && stripCodeSuffix(r.code)===code && r.name!==excludeName);
-  for(const c of candidates){
-    const emp = findEmployeeByName(c.name);
-    if(emp && emp.role==='staff') return c.name;
-  }
-  return candidates.length ? candidates[0].name : null;
+// 查某位學員在某一天的正規化班別代碼（真正打去問班表系統）
+async function getRosterCodeReal(date, empNo){
+  const raw = await getShiftForEmployee(empNo, date);
+  return normalizeCode(raw);
 }
-function computeAutoSchedule(employeeName, date){
-  const code = getRosterCode(date, employeeName);
+// 在某一天，找出誰的班別代碼跟目標代碼相同（排除自己），優先回傳身份為「藥師」的人
+async function findMentorForCodeReal(date, code, excludeEmpNo){
+  const {monthKey, dayKey} = dateStrToMonthDayKey(date);
+  const entries = await fetchScheduleMonth(monthKey);
+  if(!entries) return null;
+  let fallback = null;
+  for(const empNo of Object.keys(entries)){
+    if(empNo === excludeEmpNo) continue;
+    const raw = entries[empNo] ? entries[empNo][dayKey] : undefined;
+    if(raw===undefined || raw===null || raw==='-') continue;
+    const code2 = normalizeCode(raw);
+    if(code2 === code){
+      const emp = findEmployeeByEmpNo(empNo);
+      if(emp && emp.role==='staff') return emp.name;
+      if(!fallback && emp) fallback = emp.name;
+    }
+  }
+  return fallback;
+}
+async function computeAutoSchedule(employeeName, date){
+  const emp = findEmployeeByName(employeeName);
+  if(!emp) return null;
+  const code = await getRosterCodeReal(date, emp.empNo);
   if(!code) return null;
   const station = resolveStationForCode(code);
   if(!station) return null;
-  const mentor = findMentorForCode(date, code, employeeName);
+  const mentor = await findMentorForCodeReal(date, code, emp.empNo);
   if(!mentor) return null;
   return {station, mentor, code};
 }
-function findTraineesMentoredBy(staffName, date){
+async function findTraineesMentoredBy(staffName, date){
   const trainees = DB.employees.filter(e=>e.role==='trainee');
   const out = [];
-  trainees.forEach(t=>{
-    const auto = computeAutoSchedule(t.name, date);
+  for(const t of trainees){
+    const auto = await computeAutoSchedule(t.name, date);
     if(auto && auto.mentor===staffName) out.push({trainee:t, station:auto.station});
-  });
+  }
   return out;
 }
 
@@ -2339,6 +2421,10 @@ async function toggleItem(stationId, itemId, traineeName){
     return;
   }
   const key = progressKey(stationId, traineeName);
+  if(DB.progressLocks && DB.progressLocks[key]){
+    showToast('這個站別已完訓鎖定，如需修改請洽管理者解鎖');
+    return;
+  }
   const arr = DB.progress[key] ? DB.progress[key].slice() : [];
   const idx = arr.indexOf(itemId);
   const nowChecking = idx===-1;
@@ -2349,7 +2435,7 @@ async function toggleItem(stationId, itemId, traineeName){
   const st = findStation(stationId);
   const item = st ? st.categories.flatMap(c=>c.items).find(i=>i.id===itemId) : null;
   const today = todayStr();
-  const auto = computeAutoSchedule(traineeName, today);
+  const auto = await computeAutoSchedule(traineeName, today);
   if(!DB.learningLog) DB.learningLog = [];
   DB.learningLog.push({
     id: uid('log'),
@@ -2364,8 +2450,31 @@ async function toggleItem(stationId, itemId, traineeName){
     timestamp: new Date().toISOString(),
   });
 
+  // 全部項目都勾完了：自動鎖定，避免之後不小心誤觸取消勾選
+  if(st){
+    const total = totalItems(st);
+    const doneCount = st.categories.reduce((a,c)=>a+c.items.filter(i=>arr.includes(i.id)).length,0);
+    if(total>0 && doneCount===total){
+      if(!DB.progressLocks) DB.progressLocks = {};
+      DB.progressLocks[key] = true;
+    }
+  }
+
   await persist();
   renderApp();
+  const stAfter = findStation(stationId);
+  if(stAfter && DB.progressLocks && DB.progressLocks[key]){
+    showToast('🎉 本站已全部完成，已自動鎖定！如需修改請洽管理者解鎖');
+  }
+}
+async function unlockStationProgress(stationId, traineeName){
+  if(!confirm(`確定要解鎖「${traineeName}」在這個站別的檢核，讓他可以繼續修改嗎？`)) return;
+  const key = progressKey(stationId, traineeName);
+  if(!DB.progressLocks) DB.progressLocks = {};
+  DB.progressLocks[key] = false;
+  await persist();
+  renderApp();
+  showToast('已解鎖');
 }
 
 /* =========================================================
@@ -2414,6 +2523,26 @@ function renderToday(){
   if(user && user.role==='staff') return renderTodayStaff(user);
   return renderTodayGeneric();
 }
+async function refreshTodayData(){
+  const user = currentUser();
+  if(!user) return;
+  const t = todayStr(), tmr = tomorrowStr();
+  if(user.role==='trainee'){
+    S.todayAuto = await computeAutoSchedule(user.name, t);
+    S.todayAutoTmr = await computeAutoSchedule(user.name, tmr);
+  }else if(user.role==='staff'){
+    S.todayMentoring = await findTraineesMentoredBy(user.name, t);
+  }
+}
+async function enterTodayView(){
+  S.view = 'today';
+  S.todayLoading = true;
+  renderApp();
+  await refreshTodayData();
+  S.todayLoading = false;
+  renderApp();
+  window.scrollTo(0,0);
+}
 
 function buildShiftCard(st, shiftLabel, mentor, traineeLabel, auto, progressTraineeName){
   const pct = percentDone(st, progressTraineeName);
@@ -2440,16 +2569,20 @@ function buildShiftCard(st, shiftLabel, mentor, traineeLabel, auto, progressTrai
 function renderTodayTrainee(user){
   const t = todayStr(), tmr = tomorrowStr();
 
+  if(S.todayLoading){
+    return `<div class="view"><p style="text-align:center;color:var(--ink-soft);font-size:13px;padding:40px 0;">正在向班表系統查詢今日班別…</p></div>`;
+  }
+
   let shiftCards = '';
-  const auto = computeAutoSchedule(user.name, t);
+  const auto = S.todayAuto;
   if(auto){
     shiftCards = buildShiftCard(auto.station, '今日班別（'+auto.code+'）', auto.mentor, null, true, user.name);
   }else{
-    shiftCards = `<div class="empty-note">今天查無您的班表資料。可能是尚未匯入今日班表，或找不到當天與您相同班別代碼的指導藥師。請洽管理者確認。</div>`;
+    shiftCards = `<div class="empty-note">今天查無您的班表資料。可能是班表系統尚未發布這一天的班表，或找不到當天與您相同班別代碼的指導藥師。請洽管理者確認。</div>`;
   }
 
   let preview = '';
-  const autoTmr = computeAutoSchedule(user.name, tmr);
+  const autoTmr = S.todayAutoTmr;
   if(autoTmr){
     preview = `
     <div class="preview-card">
@@ -2474,8 +2607,12 @@ function renderTodayTrainee(user){
 
 function renderTodayStaff(user){
   const t = todayStr();
-  const mentoring = findTraineesMentoredBy(user.name, t);
 
+  if(S.todayLoading){
+    return `<div class="view"><p style="text-align:center;color:var(--ink-soft);font-size:13px;padding:40px 0;">正在向班表系統查詢今日配對…</p></div>`;
+  }
+
+  const mentoring = S.todayMentoring || [];
   let mentorBlock = '';
   if(mentoring.length){
     mentorBlock = mentoring.map(m=>`
@@ -2552,11 +2689,20 @@ function setStationsTab(t){ S.stationsTab=t; renderApp(); }
 /* =========================================================
    STATION DETAIL VIEW
    ========================================================= */
-function findAnyStaffForStation(stationId, date){
+async function findAnyStaffForStation(stationId, date){
   const codes = DB.codeMap.filter(c=>c.stationId===stationId).map(c=>c.code);
-  for(const code of codes){
-    const name = findMentorForCode(date, code, null);
-    if(name) return {name, code};
+  if(!codes.length) return null;
+  const {monthKey, dayKey} = dateStrToMonthDayKey(date);
+  const entries = await fetchScheduleMonth(monthKey);
+  if(!entries) return null;
+  for(const empNo of Object.keys(entries)){
+    const raw = entries[empNo] ? entries[empNo][dayKey] : undefined;
+    if(raw===undefined || raw===null || raw==='-') continue;
+    const code2 = normalizeCode(raw);
+    if(codes.includes(code2)){
+      const emp = findEmployeeByEmpNo(empNo);
+      if(emp && emp.role==='staff') return {name:emp.name, code:code2};
+    }
   }
   return null;
 }
@@ -2567,20 +2713,25 @@ function renderStationDetail(){
   const traineeName = S.progressTraineeName;
   const checked = getChecked(st.id, traineeName);
   const pct = percentDone(st, traineeName);
-  const todayMatch = findAnyStaffForStation(st.id, todayStr());
-  const mentorName = todayMatch ? todayMatch.name : '尚未安排';
-  const shiftLabel = todayMatch ? `今日班別（${todayMatch.code}）` : '無班表';
+  const todayMatch = S.stationMentorMatch;
+  const mentorName = S.stationMatchLoading ? '查詢中…' : (todayMatch ? todayMatch.name : '尚未安排');
+  const shiftLabel = S.stationMatchLoading ? '查詢班表中…' : (todayMatch ? `今日班別（${todayMatch.code}）` : '無班表');
   const user = currentUser();
-  const canCheck = !!(traineeName && user && user.role==='trainee' && user.name===traineeName);
+  const isLocked = !!(traineeName && DB.progressLocks && DB.progressLocks[progressKey(st.id, traineeName)]);
+  const canCheck = !!(traineeName && user && user.role==='trainee' && user.name===traineeName) && !isLocked;
 
   const stationOptions = ['weekday','sat','sun'].map(dt=>{
     const opts = DB.stations.filter(s=>(s.dayType||'weekday')===dt).map(s=>`<option value="${s.id}" ${s.id===st.id?'selected':''}>${s.emoji} ${s.name}（${s.code}）</option>`).join('');
     return opts ? `<optgroup label="${DAYTYPE_LABEL[dt]}">${opts}</optgroup>` : '';
   }).join('');
 
-  const readonlyBanner = (traineeName && !canCheck) ? `
+  const readonlyBanner = (traineeName && !canCheck && !isLocked) ? `
     <div class="hint-banner" style="background:var(--peach);color:#8B4A20;">
       🔒 唯讀模式：只有「${traineeName}」本人登入後才能勾選這些項目，其他人只能查看進度。
+    </div>` : '';
+  const lockedBanner = isLocked ? `
+    <div class="hint-banner" style="background:var(--mint);color:var(--primary-dk);">
+      🎓 已完訓鎖定：「${traineeName}」已完成本站所有項目，檢核表已鎖定不能再更動。如需修改請洽管理者到後台「學習歷程」解鎖。
     </div>` : '';
 
   const tpCards = st.teachingPoints.map(tp=>`
@@ -2596,12 +2747,12 @@ function renderStationDetail(){
       const previewSections = hasDetail ? migrateDetailToSections(item.detail) : [];
       const checkboxAttrs = canCheck
         ? `onclick="event.stopPropagation();toggleItem('${st.id}','${item.id}','${traineeName||''}')"`
-        : `disabled title="只有學員本人可以勾選"`;
+        : `disabled title="${isLocked ? '已完訓鎖定' : '只有學員本人可以勾選'}"`;
       const rowClickAction = hasDetail
         ? `openItemModal('${st.id}','${item.id}')`
         : (canCheck ? `toggleItem('${st.id}','${item.id}','${traineeName||''}')` : '');
       return `
-      <div class="check-row ${isChecked?'checked':''} ${item.important?'important':''}">
+      <div class="check-row ${isChecked?'checked':''} ${item.important?'important':''} ${isLocked?'locked':''}">
         <input type="checkbox" ${isChecked?'checked':''} ${checkboxAttrs}>
         <div class="txt" ${rowClickAction ? `onclick="${rowClickAction}"` : ''} style="${!hasDetail && !canCheck ? 'cursor:default;' : ''}">
           <div class="line">${item.text}${hasDetail?'<span class="info-dot">i</span>':''}</div>
@@ -2631,7 +2782,7 @@ function renderStationDetail(){
       <div class="progress-label"><span>教學完成度${traineeName?`（${traineeName}）`:''}</span><span>${pct}%（${checkedCount(st, traineeName)}/${totalItems(st)}）</span></div>
     </div>
 
-    ${traineeName ? readonlyBanner : ''}
+    ${isLocked ? lockedBanner : (traineeName ? readonlyBanner : '')}
 
     <div class="block-title">📖 務必教學重點</div>
     ${tpCards || '<p style="font-size:12.5px;color:var(--ink-soft);">尚未設定教學重點，請至後台新增。</p>'}
@@ -2645,14 +2796,15 @@ function renderStationDetail(){
 }
 
 async function resetStationProgress(stationId, traineeName){
-  if(!confirm(`確定要清空「${traineeName}」在這個站別的檢核進度嗎？此動作無法復原。`)) return;
+  if(!confirm(`確定要清空「${traineeName}」在這個站別的檢核進度嗎？此動作無法復原（歷史紀錄不受影響）。`)) return;
   delete DB.progress[progressKey(stationId, traineeName)];
+  if(DB.progressLocks) delete DB.progressLocks[progressKey(stationId, traineeName)];
   await persist();
   renderApp();
   showToast('已重置該學員的檢核進度');
 }
 
-function openStation(id, traineeName){
+async function openStation(id, traineeName){
   S.stationId=id;
   const user = currentUser();
   if(user && user.role==='trainee'){
@@ -2663,7 +2815,13 @@ function openStation(id, traineeName){
   }else{
     S.progressTraineeName = null;
   }
-  S.view='station-detail'; renderApp(); window.scrollTo(0,0);
+  S.view='station-detail';
+  S.stationMatchLoading = true;
+  S.stationMentorMatch = null;
+  renderApp(); window.scrollTo(0,0);
+  S.stationMentorMatch = await findAnyStaffForStation(id, todayStr());
+  S.stationMatchLoading = false;
+  renderApp();
 }
 async function openItemModal(stationId, itemId){
   const st = findStation(stationId);
@@ -3246,38 +3404,54 @@ function renderAdminHistory(){
     const total = totalItems(st);
     if(!total) return null;
     const done = checkedCount(st, name);
-    if(done===0) return null;
     return {st, done, total, pct: percentDone(st, name)};
   }).filter(Boolean);
 
-  const summaryHtml = stationSummary.length ? stationSummary.map(s=>`
+  const summaryHtml = stationSummary.length ? stationSummary.map(s=>{
+    const locked = !!(DB.progressLocks && DB.progressLocks[progressKey(s.st.id, name)]);
+    return `
     <div class="admin-item-row">
-      <div class="t">${s.st.emoji} <b>${s.st.name}</b>（${s.st.code}） · ${s.done}/${s.total} 項（${s.pct}%）</div>
-    </div>`).join('') : '<p style="font-size:12.5px;color:var(--ink-soft);">此學員尚未開始任何站別的檢核。</p>';
+      <div class="t">${s.st.emoji} <b>${s.st.name}</b>（${s.st.code}） · ${s.done}/${s.total} 項（${s.pct}%）${s.done===0?' <span style="color:var(--ink-soft);">尚未開始</span>':''}${locked?' <span class="pill-tag tag-mint">🎓 已完訓鎖定</span>':''}</div>
+      ${locked?`<button class="mini-edit" onclick="unlockStationProgress('${s.st.id}','${escAttr(name)}')">解鎖</button>`:''}
+    </div>`;
+  }).join('') : '<p style="font-size:12.5px;color:var(--ink-soft);">尚無任何站別資料。</p>';
 
   const logEntries = (DB.learningLog||[])
     .filter(l=>l.traineeName===name && l.checked)
     .sort((a,b)=>b.timestamp.localeCompare(a.timestamp));
 
-  const logHtml = logEntries.length ? logEntries.map(l=>`
-    <tr>
-      <td>${l.date}</td>
-      <td>${l.stationName}</td>
-      <td>${l.itemText}</td>
-      <td>${l.mentor || '（無自動配對紀錄）'}</td>
-    </tr>`).join('') : '';
+  // 依站別分組顯示詳細紀錄
+  const logByStation = {};
+  logEntries.forEach(l=>{
+    if(!logByStation[l.stationName]) logByStation[l.stationName] = [];
+    logByStation[l.stationName].push(l);
+  });
+  const stationNamesWithLogs = Object.keys(logByStation);
+
+  const logHtml = stationNamesWithLogs.length ? stationNamesWithLogs.map(stName=>{
+    const rows = logByStation[stName].map(l=>`
+      <tr>
+        <td>${l.date}</td>
+        <td>${l.itemText}</td>
+        <td>${l.mentor || '（無自動配對紀錄）'}</td>
+      </tr>`).join('');
+    return `
+      <div class="subhead" style="margin-top:14px;font-size:12px;">${stName}（${logByStation[stName].length} 項）</div>
+      <div style="overflow-x:auto;">
+        <table class="sched-table">
+          <thead><tr><th>日期</th><th>項目</th><th>當時導師</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>`;
+  }).join('') : '<p style="font-size:12.5px;color:var(--ink-soft);">尚無紀錄。</p>';
 
   return `
     ${picker}
-    <div class="subhead" style="margin-top:14px;">進度總覽</div>
+    <div class="subhead" style="margin-top:14px;">進度總覽（所有站別）</div>
     ${summaryHtml}
-    <div class="subhead">詳細紀錄（依時間新到舊）</div>
-    <div style="overflow-x:auto;">
-      <table class="sched-table">
-        <thead><tr><th>日期</th><th>站別</th><th>項目</th><th>當時導師</th></tr></thead>
-        <tbody>${logHtml || '<tr><td colspan="4" style="color:var(--ink-soft);padding:14px 4px;">尚無紀錄</td></tr>'}</tbody>
-      </table>
-    </div>
+    <div class="subhead">詳細紀錄（依站別分組，各組內時間新到舊）</div>
+    <p style="font-size:11px;color:var(--ink-soft);margin:0 0 6px;">提醒：若在站別頁面重置了某位學員的檢核進度，這裡的歷史紀錄仍會保留，不會被清空——這份紀錄是永久的學習軌跡，跟目前的勾選進度是分開存的。</p>
+    ${logHtml}
   `;
 }
 
@@ -3318,14 +3492,18 @@ async function deleteCodeMap(id){
    ROOT RENDER
    ========================================================= */
 let adminPasswordError = '';
-function route(view){
+async function route(view){
   if(view==='admin' && !S.adminUnlocked){
     adminPasswordError = '';
     S.view = 'admin-lock';
     renderApp(); window.scrollTo(0,0);
     return;
   }
-  S.view=view; if(view!=='station-detail'){} renderApp(); window.scrollTo(0,0);
+  if(view==='today'){
+    await enterTodayView();
+    return;
+  }
+  S.view=view; renderApp(); window.scrollTo(0,0);
 }
 function renderAdminLock(){
   return `
@@ -3413,8 +3591,7 @@ async function doLogin(){
   if(!emp){ loginError='查無此員編，請確認後再試一次'; renderApp(); return; }
   loginError='';
   sessionUserId = emp.id; // 只存在記憶體裡，不寫進資料庫
-  S.view = 'today';
-  renderApp();
+  await enterTodayView();
 }
 async function doLogout(){
   sessionUserId = null;
@@ -3523,7 +3700,7 @@ function showFatalError(title, detail){
       showFatalError('Firebase 程式庫載入失敗', 'firebase-app-compat.js 等外部程式庫沒有成功載入，可能是網路連線問題，或瀏覽器/防火牆擋住了 gstatic.com。請檢查網路連線後重新整理頁面。');
       return;
     }
-    try{ initScheduleFirebase(); }catch(e){ console.error('班表系統連線初始化失敗（不影響主要功能）', e); }
+    initScheduleFirebase().catch(e=>console.error('班表系統連線初始化失敗（不影響主要功能）', e));
     await withTimeout(loadDB(), 12000, '資料庫連線');
     const dow = new Date().getDay();
     S.stationsTab = dow===6 ? 'sat' : (dow===0 ? 'sun' : 'weekday');
