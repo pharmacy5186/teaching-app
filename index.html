@@ -478,11 +478,9 @@ async function scheduleReadDoc(collectionName, docId){
 }
 
 // ---- 真正的班表快照讀取（依對方提供的路徑規格） ----
-const scheduleMonthCache = {}; // monthKey -> {entries} | null，同一次頁面工作階段內快取，避免同一頁重複狂打 Firestore
-async function fetchScheduleMonth(monthKey, forceRefresh){
-  if(!forceRefresh && Object.prototype.hasOwnProperty.call(scheduleMonthCache, monthKey)){
-    return scheduleMonthCache[monthKey];
-  }
+async function fetchScheduleMonth(monthKey){
+  // 對方系統工程師建議：每次查詢都直接重新 getDoc，不要快取，
+  // 才能確保拿到「發布班表/換班核定/抽籤/解鎖」等動作發生後的最新結果
   try{
     if(!scheduleDbReady || !scheduleAuthReady){
       const ok = await initScheduleFirebase();
@@ -492,17 +490,13 @@ async function fetchScheduleMonth(monthKey, forceRefresh){
     // 月份（monthKey）推測是這份文件裡的一個欄位，不是路徑的一部分
     const ref = scheduleDb.doc(SCHEDULE_DOC_PATH_PREFIX);
     const snap = await ref.get();
-    if(!snap.exists){ console.warn('scheduleDirectory 文件不存在'); scheduleMonthCache[monthKey] = null; return null; }
+    if(!snap.exists){ console.warn('scheduleDirectory 文件不存在'); return null; }
     const data = snap.data();
-    console.log('[班表除錯] scheduleDirectory 文件內容：', data);
     const monthData = data ? data[monthKey] : null;
     const entries = monthData ? (monthData.entries || null) : null;
-    console.log('[班表除錯] 嘗試取用月份欄位 "'+monthKey+'"：', monthData, '→ entries:', entries);
-    scheduleMonthCache[monthKey] = entries;
     return entries;
   }catch(e){
     console.error('讀取班表快照失敗', e);
-    scheduleMonthCache[monthKey] = null;
     return null;
   }
 }
@@ -517,10 +511,10 @@ function extractRealCode(raw){
   return m ? m[1].trim() : String(raw).trim();
 }
 // 查詢某位員工在某一天的班別代碼（原始代碼，未做括號/後綴處理）
-async function getShiftForEmployee(empNo, dateStr, forceRefresh){
+async function getShiftForEmployee(empNo, dateStr){
   if(!empNo) return null;
   const {monthKey, dayKey} = dateStrToMonthDayKey(dateStr);
-  const entries = await fetchScheduleMonth(monthKey, forceRefresh);
+  const entries = await fetchScheduleMonth(monthKey);
   if(!entries) return null;
   const raw = entries[empNo] ? entries[empNo][dayKey] : undefined;
   if(raw === undefined || raw === null || raw === '-') return null; // 空班/查無
@@ -2682,6 +2676,7 @@ function renderTodayTrainee(user){
   <div class="view">
     <div class="greeting">早安，${user.name}！</div>
     <div class="greeting-sub">今天是 ${t}（${weekdayZh(t)}），以下是您的班表與指導藥師資訊。</div>
+    <button class="btn btn-ghost btn-sm" style="margin-bottom:10px;" onclick="enterTodayView()">🔄 重新整理班表資料</button>
     <div class="section-label"><span>📅 今日學習站別</span><div class="dash"></div></div>
     ${shiftCards}
     <div class="section-label"><span>🔭 明日預告</span><div class="dash"></div></div>
@@ -2721,6 +2716,7 @@ function renderTodayStaff(user){
   <div class="view">
     <div class="greeting">早安，${user.name}！</div>
     <div class="greeting-sub">今天是 ${t}（${weekdayZh(t)}），以下是根據班表自動比對的教學配對。</div>
+    <button class="btn btn-ghost btn-sm" style="margin-bottom:10px;" onclick="enterTodayView()">🔄 重新整理班表資料</button>
     <div class="section-label"><span>🧑‍🏫 教學配對</span><div class="dash"></div></div>
     ${mentorBlock}
   </div>`;
@@ -2873,6 +2869,7 @@ function renderStationDetail(){
       <button class="back-btn" onclick="route('stations')">← 回總覽</button>
       <select class="station-select" onchange="openStation(this.value, S.progressTraineeName)">${stationOptions}</select>
     </div>
+    <button class="btn btn-ghost btn-sm" style="margin-bottom:8px;" onclick="openStation('${st.id}', S.progressTraineeName)">🔄 重新整理班表資料</button>
 
     <div class="station-header" style="background:linear-gradient(135deg, ${c.hex}, ${c.hex}CC);">
       <span class="shift-badge">${shiftLabel}</span>
