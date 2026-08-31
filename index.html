@@ -2301,6 +2301,32 @@ function withIncidentCategories(data){
   });
   return data;
 }
+// 修復舊資料：早期示範資料把圖片直接用 base64 內嵌在教學重點的 image 欄位裡，
+// 這會讓主資料庫文件越來越大，撞到 Firestore 單一文件 1MB 上限造成整個 App 存不進資料。
+// 這裡會自動把過大的內嵌圖片搬到獨立的附件集合，並把主文件裡的欄位清空瘦身。
+const INLINE_IMAGE_SIZE_THRESHOLD = 30000; // 約 30KB以上就視為過大
+async function migrateOversizedInlineImages(){
+  if(!firebaseReady || !DB.stations) return;
+  let changed = false;
+  for(const st of DB.stations){
+    for(const tp of (st.teachingPoints||[])){
+      if(tp.image && tp.image.length > INLINE_IMAGE_SIZE_THRESHOLD){
+        try{
+          const id = uid('att');
+          await saveAttachmentDoc(id, {type:'image', name: tp.title || '教學圖片', data: tp.image});
+          if(!tp.attachments) tp.attachments = [];
+          tp.attachments.push({id, type:'image', name: tp.title || '教學圖片'});
+          tp.image = '';
+          changed = true;
+        }catch(e){ console.error('搬移內嵌圖片失敗', e); }
+      }
+    }
+  }
+  if(changed){
+    console.warn('已自動將過大的內嵌圖片搬移到獨立附件，並精簡主資料庫文件大小。');
+    await persist();
+  }
+}
 
 
 let DB = null;
@@ -2318,10 +2344,12 @@ async function loadDB(){
     if(doc.exists){
       DB = doc.data();
       migrateDB();
+      await migrateOversizedInlineImages();
       return;
     }
   }catch(e){ console.error('Firestore 讀取失敗', e); }
   DB = withIncidentCategories(buildDefaultData());
+  await migrateOversizedInlineImages();
   await persist();
 }
 function migrateDB(){
