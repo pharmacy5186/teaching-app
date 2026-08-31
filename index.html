@@ -444,7 +444,7 @@ const scheduleFirebaseConfig = {
   measurementId: "G-BVDVEYZEDT"
 };
 // 對方系統工程師提供的固定資料路徑（完全比照對方給的原始寫法組成路徑字串，避免自己猜錯集合/文件交錯方式）
-const SCHEDULE_DOC_PATH_PREFIX = 'artifacts/pharmacy-system-v1-8/public/data/roster/scheduleDirectory';
+const SCHEDULE_COLLECTION_PATH = 'artifacts/pharmacy-system-v1-8/public/data/roster/main/scheduleDirectory';
 let scheduleDbReady = false;
 let scheduleDb = null;
 let scheduleAuthReady = false;
@@ -486,14 +486,14 @@ async function fetchScheduleMonth(monthKey){
       const ok = await initScheduleFirebase();
       if(!ok) throw new Error('班表系統連線失敗');
     }
-    // scheduleDirectory 本身就是一份完整文件（6層路徑=偶數=合法文件），
-    // 月份（monthKey）推測是這份文件裡的一個欄位，不是路徑的一部分
-    const ref = scheduleDb.doc(SCHEDULE_DOC_PATH_PREFIX);
+    // 正確路徑（已用 Firebase Console 實際結構確認）：
+    // artifacts/pharmacy-system-v1-8/public/data/roster/main/scheduleDirectory 是集合，
+    // 月份（例如 2026-09）是這個集合底下的一份文件
+    const ref = scheduleDb.collection(SCHEDULE_COLLECTION_PATH).doc(monthKey);
     const snap = await ref.get();
-    if(!snap.exists){ console.warn('scheduleDirectory 文件不存在'); return null; }
+    if(!snap.exists){ console.warn('查無這個月份的班表文件：', monthKey); return null; }
     const data = snap.data();
-    const monthData = data ? data[monthKey] : null;
-    const entries = monthData ? (monthData.entries || null) : null;
+    const entries = data ? (data.entries || null) : null;
     return entries;
   }catch(e){
     console.error('讀取班表快照失敗', e);
@@ -2414,7 +2414,7 @@ async function persist(){
 /* =========================================================
    狀態
    ========================================================= */
-const S = { view:'today', stationId:null, adminTab:'stations', editingStation:null, editingItem:null, stationsTab:'weekday', adminUnlocked:false, progressTraineeName:null, historyTraineeFilter:'', todayLoading:false, todayAuto:null, todayAutoTmr:null, todayMentoring:null, stationMentorMatch:null, stationMatchLoading:false, backupLoading:false, backupList:null };
+const S = { view:'today', stationId:null, stationViewDate:null, adminTab:'stations', editingStation:null, editingItem:null, stationsTab:'weekday', adminUnlocked:false, progressTraineeName:null, historyTraineeFilter:'', todayLoading:false, todayAuto:null, todayAutoTmr:null, todayMentoring:null, stationMentorMatch:null, stationMatchLoading:false, backupLoading:false, backupList:null };
 
 function findStation(id){ return DB.stations.find(s=>s.id===id); }
 
@@ -2666,7 +2666,7 @@ function renderTodayTrainee(user){
     <div class="preview-card">
       <h4>${autoTmr.station.emoji} ${autoTmr.station.name}（${autoTmr.code}） · 自動配對</h4>
       <p>明日指導藥師：${autoTmr.mentor}，請提前預習站別教學重點。</p>
-      <button class="btn btn-outline btn-sm" style="background:rgba(255,255,255,0.15);color:#fff;border-color:rgba(255,255,255,0.5);" onclick="openStation('${autoTmr.station.id}','${user.name}')">預習教學指引</button>
+      <button class="btn btn-outline btn-sm" style="background:rgba(255,255,255,0.15);color:#fff;border-color:rgba(255,255,255,0.5);" onclick="openStation('${autoTmr.station.id}','${user.name}',tomorrowStr())">預習教學指引</button>
     </div>`;
   }else{
     preview = `<div class="empty-note">尚無明日班表資料。</div>`;
@@ -2793,9 +2793,12 @@ function renderStationDetail(){
   const traineeName = S.progressTraineeName;
   const checked = getChecked(st.id, traineeName);
   const pct = percentDone(st, traineeName);
+  const viewDate = S.stationViewDate || todayStr();
+  const isViewingTomorrow = viewDate === tomorrowStr();
+  const dateLabel = isViewingTomorrow ? '明日' : '今日';
   const todayMatch = S.stationMentorMatch;
   const mentorName = S.stationMatchLoading ? '查詢中…' : (todayMatch ? todayMatch.name : '尚未安排');
-  const shiftLabel = S.stationMatchLoading ? '查詢班表中…' : (todayMatch ? `今日班別（${todayMatch.code}）` : '無班表');
+  const shiftLabel = S.stationMatchLoading ? '查詢班表中…' : (todayMatch ? `${dateLabel}班別（${todayMatch.code}）` : `無班表（${viewDate}）`);
   const user = currentUser();
   const isLocked = !!(traineeName && DB.progressLocks && DB.progressLocks[progressKey(st.id, traineeName)]);
   const canCheck = !!(traineeName && user && user.role==='trainee' && user.name===traineeName) && !isLocked;
@@ -2867,9 +2870,9 @@ function renderStationDetail(){
   <div class="view">
     <div class="back-row">
       <button class="back-btn" onclick="route('stations')">← 回總覽</button>
-      <select class="station-select" onchange="openStation(this.value, S.progressTraineeName)">${stationOptions}</select>
+      <select class="station-select" onchange="openStation(this.value, S.progressTraineeName, S.stationViewDate)">${stationOptions}</select>
     </div>
-    <button class="btn btn-ghost btn-sm" style="margin-bottom:8px;" onclick="openStation('${st.id}', S.progressTraineeName)">🔄 重新整理班表資料</button>
+    <button class="btn btn-ghost btn-sm" style="margin-bottom:8px;" onclick="openStation('${st.id}', S.progressTraineeName, S.stationViewDate)">🔄 重新整理班表資料（${dateLabel}）</button>
 
     <div class="station-header" style="background:linear-gradient(135deg, ${c.hex}, ${c.hex}CC);">
       <span class="shift-badge">${shiftLabel}</span>
@@ -2903,8 +2906,9 @@ async function resetStationProgress(stationId, traineeName){
   showToast('已重置該學員的檢核進度');
 }
 
-async function openStation(id, traineeName){
+async function openStation(id, traineeName, dateStr){
   S.stationId=id;
+  S.stationViewDate = dateStr || todayStr();
   const user = currentUser();
   if(user && user.role==='trainee'){
     // 學員本人永遠只綁定自己的進度，不受任何傳入參數影響
@@ -2918,7 +2922,7 @@ async function openStation(id, traineeName){
   S.stationMatchLoading = true;
   S.stationMentorMatch = null;
   renderApp(); window.scrollTo(0,0);
-  S.stationMentorMatch = await findAnyStaffForStation(id, todayStr());
+  S.stationMentorMatch = await findAnyStaffForStation(id, S.stationViewDate);
   S.stationMatchLoading = false;
   renderApp();
 }
