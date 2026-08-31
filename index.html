@@ -2983,13 +2983,17 @@ function renderStationEditor(stationId){
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
         <b style="font-size:13px;">${ci+1}. ${cat.title}</b>
         <div>
+          <button class="mini-edit" onclick="moveCategory('${st.id}','${cat.id}',-1)" ${ci===0?'disabled style="opacity:.3;"':''}>↑</button>
+          <button class="mini-edit" onclick="moveCategory('${st.id}','${cat.id}',1)" ${ci===normalCats.length-1?'disabled style="opacity:.3;"':''}>↓</button>
           <button class="mini-edit" onclick="renameCategory('${st.id}','${cat.id}')">重新命名</button>
           <button class="mini-x" onclick="deleteCategory('${st.id}','${cat.id}')">✕</button>
         </div>
       </div>
-      ${cat.items.map(item=>`
+      ${cat.items.map((item,ii)=>`
         <div class="admin-item-row">
           <div class="t">${item.text} ${item.important?'<span class="pill-tag" style="background:var(--danger-tint);color:var(--danger);">重要</span>':''} ${item.detail?'<span class="pill-tag tag-sky">有教學內容</span>':''}</div>
+          <button class="mini-edit" onclick="moveItem('${st.id}','${cat.id}','${item.id}',-1)" ${ii===0?'disabled style="opacity:.3;"':''}>↑</button>
+          <button class="mini-edit" onclick="moveItem('${st.id}','${cat.id}','${item.id}',1)" ${ii===cat.items.length-1?'disabled style="opacity:.3;"':''}>↓</button>
           <button class="mini-edit" onclick="editItem('${st.id}','${cat.id}','${item.id}')">編輯</button>
           <button class="mini-x" onclick="deleteItem('${st.id}','${cat.id}','${item.id}')">✕</button>
         </div>`).join('')}
@@ -3002,9 +3006,11 @@ function renderStationEditor(stationId){
         <b style="font-size:13px;color:#7A3F0C;">⚠️ ${incidentCat.title}</b>
         <span style="font-size:10.5px;color:#8A4A0C;">不算入教學完成度</span>
       </div>
-      ${incidentCat.items.map(item=>`
+      ${incidentCat.items.map((item,ii)=>`
         <div class="admin-item-row" style="background:#fff;">
           <div class="t">${item.text} ${item.detail?'<span class="pill-tag tag-sky">已記錄詳情</span>':''}</div>
+          <button class="mini-edit" onclick="moveItem('${st.id}','${incidentCat.id}','${item.id}',-1)" ${ii===0?'disabled style="opacity:.3;"':''}>↑</button>
+          <button class="mini-edit" onclick="moveItem('${st.id}','${incidentCat.id}','${item.id}',1)" ${ii===incidentCat.items.length-1?'disabled style="opacity:.3;"':''}>↓</button>
           <button class="mini-edit" onclick="editItem('${st.id}','${incidentCat.id}','${item.id}')">編輯</button>
           <button class="mini-x" onclick="deleteItem('${st.id}','${incidentCat.id}','${item.id}')">✕</button>
         </div>`).join('')}
@@ -3137,7 +3143,31 @@ async function removeTpAttachment(stId, tpId, attId){
 
 async function addCategory(stId){
   const st = findStation(stId);
-  st.categories.push({id:uid('c'), title:'新分類', items:[]});
+  // 新分類要插在「異常事件記錄」之前，不要接在它後面
+  const incidentIdx = st.categories.findIndex(c=>c.isIncident);
+  const newCat = {id:uid('c'), title:'新分類', items:[]};
+  if(incidentIdx>-1) st.categories.splice(incidentIdx, 0, newCat);
+  else st.categories.push(newCat);
+  await persist(); renderApp();
+}
+async function moveCategory(stId, catId, direction){
+  const st = findStation(stId);
+  const normal = st.categories.filter(c=>!c.isIncident);
+  const incident = st.categories.filter(c=>c.isIncident);
+  const idx = normal.findIndex(c=>c.id===catId);
+  const newIdx = idx + direction;
+  if(idx<0 || newIdx<0 || newIdx>=normal.length) return;
+  const tmp = normal[idx]; normal[idx] = normal[newIdx]; normal[newIdx] = tmp;
+  st.categories = normal.concat(incident);
+  await persist(); renderApp();
+}
+async function moveItem(stId, catId, itemId, direction){
+  const st = findStation(stId);
+  const cat = st.categories.find(c=>c.id===catId);
+  const idx = cat.items.findIndex(i=>i.id===itemId);
+  const newIdx = idx + direction;
+  if(idx<0 || newIdx<0 || newIdx>=cat.items.length) return;
+  const tmp = cat.items[idx]; cat.items[idx] = cat.items[newIdx]; cat.items[newIdx] = tmp;
   await persist(); renderApp();
 }
 function renameCategory(stId, catId){
