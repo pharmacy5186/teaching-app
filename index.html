@@ -488,9 +488,16 @@ async function fetchScheduleMonth(monthKey, forceRefresh){
       const ok = await initScheduleFirebase();
       if(!ok) throw new Error('班表系統連線失敗');
     }
-    let ref = scheduleDb.doc(`${SCHEDULE_DOC_PATH_PREFIX}/${monthKey}`);
+    // scheduleDirectory 本身就是一份完整文件（6層路徑=偶數=合法文件），
+    // 月份（monthKey）推測是這份文件裡的一個欄位，不是路徑的一部分
+    const ref = scheduleDb.doc(SCHEDULE_DOC_PATH_PREFIX);
     const snap = await ref.get();
-    const entries = snap.exists ? (snap.data().entries || {}) : null;
+    if(!snap.exists){ console.warn('scheduleDirectory 文件不存在'); scheduleMonthCache[monthKey] = null; return null; }
+    const data = snap.data();
+    console.log('[班表除錯] scheduleDirectory 文件內容：', data);
+    const monthData = data ? data[monthKey] : null;
+    const entries = monthData ? (monthData.entries || null) : null;
+    console.log('[班表除錯] 嘗試取用月份欄位 "'+monthKey+'"：', monthData, '→ entries:', entries);
     scheduleMonthCache[monthKey] = entries;
     return entries;
   }catch(e){
@@ -2332,6 +2339,7 @@ async function migrateOversizedInlineImages(){
 let DB = null;
 let firebaseConfigMissing = false;
 
+let dbLoadFailed = false;
 async function loadDB(){
   const ok = initFirebase();
   if(!ok){
@@ -2347,10 +2355,18 @@ async function loadDB(){
       await migrateOversizedInlineImages();
       return;
     }
-  }catch(e){ console.error('Firestore 讀取失敗', e); }
-  DB = withIncidentCategories(buildDefaultData());
-  await migrateOversizedInlineImages();
-  await persist();
+    // 文件真的「從來不存在」（第一次安裝），這種情況下才安全地寫入示範資料
+    DB = withIncidentCategories(buildDefaultData());
+    await migrateOversizedInlineImages();
+    await persist();
+  }catch(e){
+    // 讀取失敗（網路問題、權限問題、任何原因）絕對不能自動覆蓋掉可能已經存在的真實資料庫內容！
+    // 只在記憶體裡暫時顯示示範資料讓畫面不至於完全空白，但「不會」寫回資料庫，
+    // 並且會擋住所有畫面、顯示明確錯誤，避免使用者誤以為一切正常而繼續操作、進而把示範資料存進去蓋掉真實資料。
+    console.error('Firestore 讀取失敗，為了保護您的真實資料，不會自動寫入任何內容', e);
+    dbLoadFailed = true;
+    DB = withIncidentCategories(buildDefaultData());
+  }
 }
 function migrateDB(){
   if(!DB.employees) DB.employees = [];
@@ -2362,9 +2378,39 @@ function migrateDB(){
   if(!DB.progressLocks) DB.progressLocks = {};
   withIncidentCategories(DB);
 }
+const BACKUPS_COLLECTION = 'pharmacy_teaching_app_backups';
+const MAX_BACKUPS_TO_KEEP = 30; // 保留最近30天，避免備份無限增加
+let backupDoneToday = false;
+async function ensureDailyBackup(){
+  if(backupDoneToday || !firebaseReady) return;
+  try{
+    const today = todayStr();
+    const backupRef = firestoreDb.collection(BACKUPS_COLLECTION).doc(today);
+    const existing = await backupRef.get();
+    if(!existing.exists){
+      // 備份「今天第一次存檔之前」資料庫實際存在的內容（也就是目前為止最後一次成功存檔的狀態）
+      const mainDoc = await firestoreDb.collection(FIRESTORE_DOC_PATH[0]).doc(FIRESTORE_DOC_PATH[1]).get();
+      if(mainDoc.exists){
+        await backupRef.set({ ...mainDoc.data(), _backedUpAt: new Date().toISOString() });
+        cleanupOldBackups().catch(e=>console.error('清理舊備份失敗（不影響備份本身）', e));
+      }
+    }
+    backupDoneToday = true;
+  }catch(e){ console.error('每日備份失敗（不影響正常使用，但這次沒有備份到）', e); }
+}
+async function cleanupOldBackups(){
+  const snap = await firestoreDb.collection(BACKUPS_COLLECTION).get();
+  const ids = snap.docs.map(d=>d.id).sort(); // 日期字串格式 YYYY-MM-DD，字串排序等同時間排序
+  if(ids.length <= MAX_BACKUPS_TO_KEEP) return;
+  const toDelete = ids.slice(0, ids.length - MAX_BACKUPS_TO_KEEP);
+  for(const id of toDelete){
+    await firestoreDb.collection(BACKUPS_COLLECTION).doc(id).delete();
+  }
+}
 async function persist(){
   if(!firebaseReady){ firebaseConfigMissing = true; return; }
   try{
+    await ensureDailyBackup();
     await firestoreDb.collection(FIRESTORE_DOC_PATH[0]).doc(FIRESTORE_DOC_PATH[1]).set(DB);
   }catch(e){
     console.error('Firestore 寫入失敗', e);
@@ -2374,7 +2420,7 @@ async function persist(){
 /* =========================================================
    狀態
    ========================================================= */
-const S = { view:'today', stationId:null, adminTab:'stations', editingStation:null, editingItem:null, stationsTab:'weekday', adminUnlocked:false, progressTraineeName:null, historyTraineeFilter:'', todayLoading:false, todayAuto:null, todayAutoTmr:null, todayMentoring:null, stationMentorMatch:null, stationMatchLoading:false };
+const S = { view:'today', stationId:null, adminTab:'stations', editingStation:null, editingItem:null, stationsTab:'weekday', adminUnlocked:false, progressTraineeName:null, historyTraineeFilter:'', todayLoading:false, todayAuto:null, todayAutoTmr:null, todayMentoring:null, stationMentorMatch:null, stationMatchLoading:false, backupLoading:false, backupList:null };
 
 function findStation(id){ return DB.stations.find(s=>s.id===id); }
 
@@ -2945,11 +2991,22 @@ function renderAdmin(){
       <button class="${S.adminTab==='stations'?'active':''}" onclick="setAdminTab('stations')">站別與檢核表</button>
       <button class="${S.adminTab==='people'?'active':''}" onclick="setAdminTab('people')">學員與人員</button>
       <button class="${S.adminTab==='history'?'active':''}" onclick="setAdminTab('history')">學習歷程</button>
+      <button class="${S.adminTab==='backup'?'active':''}" onclick="setAdminTab('backup')">資料備份</button>
     </div>
-    ${S.adminTab==='stations' ? renderAdminStations() : S.adminTab==='people' ? renderAdminPeople() : renderAdminHistory()}
+    ${S.adminTab==='stations' ? renderAdminStations() : S.adminTab==='people' ? renderAdminPeople() : S.adminTab==='history' ? renderAdminHistory() : renderAdminBackup()}
   </div>`;
 }
-function setAdminTab(t){ S.adminTab=t; S.editingStation=null; renderApp(); }
+async function setAdminTab(t){
+  S.adminTab=t; S.editingStation=null;
+  if(t==='backup'){
+    S.backupLoading = true;
+    S.backupList = null;
+    renderApp();
+    S.backupList = await fetchBackupList();
+    S.backupLoading = false;
+  }
+  renderApp();
+}
 
 function renderAdminStations(){
   if(S.editingStation){ return renderStationEditor(S.editingStation); }
@@ -3468,7 +3525,7 @@ function renderAdminPeople(){
     <div class="subhead">後台管理密碼</div>
     <p style="font-size:11.5px;color:var(--ink-soft);margin:0 0 10px;">進入「後台管理」需要輸入的密碼，改完立即生效。</p>
     <div class="card">
-      <div class="form-group"><label>新密碼（僅限數字）</label><input type="text" inputmode="numeric" pattern="[0-9]*" id="new-admin-pw" oninput="this.value=this.value.replace(/[^0-9]/g,'')" placeholder="輸入新密碼"></div>
+      <div class="form-group"><label>新密碼</label><input type="text" id="new-admin-pw" placeholder="輸入新密碼"></div>
       <button class="btn btn-primary btn-block" onclick="updateAdminPassword()">更新密碼</button>
     </div>
   `;
@@ -3480,6 +3537,53 @@ async function updateAdminPassword(){
   await persist();
   showToast('後台密碼已更新');
   document.getElementById('new-admin-pw').value = '';
+}
+
+/* =========================================================
+   ADMIN — 附件救援
+   ========================================================= */
+/* =========================================================
+   ADMIN — 資料備份
+   ========================================================= */
+async function fetchBackupList(){
+  if(!firebaseReady) return [];
+  try{
+    const snap = await firestoreDb.collection(BACKUPS_COLLECTION).get();
+    return snap.docs.map(d=>({id:d.id, backedUpAt:d.data()._backedUpAt||''})).sort((a,b)=>b.id.localeCompare(a.id));
+  }catch(e){ console.error('讀取備份清單失敗', e); return []; }
+}
+function renderAdminBackup(){
+  if(S.backupLoading){
+    return `<p style="font-size:12.5px;color:var(--ink-soft);padding:20px 0;text-align:center;">正在讀取備份清單…</p>`;
+  }
+  const list = S.backupList || [];
+  return `
+    <p style="font-size:11.5px;color:var(--ink-soft);margin:0 0 10px;">系統每天第一次存檔前，會自動把「當天開始前」的完整資料庫內容備份下來，最多保留最近 30 天。如果資料不小心被覆蓋或誤刪，可以在這裡選一個日期還原。</p>
+    <button class="btn btn-outline btn-block" style="margin-bottom:10px;" onclick="setAdminTab('backup')">🔄 重新整理清單</button>
+    ${list.length ? list.map(b=>`
+      <div class="admin-item-row">
+        <div class="t">📦 ${b.id}${b.backedUpAt?` <span style="color:var(--ink-soft);font-size:11px;">(${new Date(b.backedUpAt).toLocaleString('zh-TW')} 備份)</span>`:''}</div>
+        <button class="mini-x" style="color:var(--primary-dk);" onclick="restoreFromBackup('${b.id}')">還原到此</button>
+      </div>`).join('') : '<p style="font-size:12.5px;color:var(--ink-soft);">目前還沒有任何備份（今天是第一次使用備份功能，明天之後就會開始累積）。</p>'}
+  `;
+}
+async function restoreFromBackup(dateId){
+  if(!confirm(`確定要把資料庫還原到「${dateId}」那天開始前的狀態嗎？\n\n這會覆蓋掉現在的所有資料（包含還原之後才做的修改），此動作無法復原，請先確認清楚。`)) return;
+  try{
+    const doc = await firestoreDb.collection(BACKUPS_COLLECTION).doc(dateId).get();
+    if(!doc.exists){ showToast('找不到這份備份'); return; }
+    const data = doc.data();
+    delete data._backedUpAt;
+    DB = data;
+    migrateDB();
+    await persist();
+    S.adminTab = 'stations';
+    renderApp();
+    showToast(`已還原到 ${dateId} 的備份`);
+  }catch(e){
+    console.error('還原失敗', e);
+    showToast('還原失敗，請檢查網路連線');
+  }
 }
 
 /* =========================================================
@@ -3622,7 +3726,7 @@ function renderAdminLock(){
       <div class="rx-mark" style="width:52px;height:52px;font-size:26px;margin:0 auto 24px;">🔒</div>
       <div style="max-width:300px;margin:0 auto;">
         <label class="login-field-label">後台管理密碼</label>
-        <input type="password" inputmode="numeric" pattern="[0-9]*" id="admin-pw-input" class="login-id-input" style="text-align:left;font-size:16px;letter-spacing:normal;font-family:var(--font-body);" oninput="this.value=this.value.replace(/[^0-9]/g,'')" onkeydown="if(event.key==='Enter')checkAdminPassword()" autofocus>
+        <input type="password" id="admin-pw-input" class="login-id-input" style="text-align:left;font-size:16px;letter-spacing:normal;font-family:var(--font-body);" onkeydown="if(event.key==='Enter')checkAdminPassword()" autofocus>
         ${adminPasswordError ? `<p style="color:var(--danger);font-size:12px;margin:10px 0 0;">${adminPasswordError}</p>` : ''}
         <button class="btn btn-primary btn-block" style="margin-top:16px;" onclick="checkAdminPassword()">進入後台</button>
         <button class="btn btn-outline btn-block" style="margin-top:8px;" onclick="route('today')">取消</button>
@@ -3713,6 +3817,27 @@ async function doLogout(){
 function renderApp(){
   const app = document.getElementById('app');
   const user = currentUser();
+
+  if(dbLoadFailed){
+    app.innerHTML = `
+      <div class="shell">
+        <div class="topbar">
+          <div class="brand">
+            <div class="rx-mark">℞</div>
+            <div><h1>門診教學指引</h1><p>On-the-spot Teaching</p></div>
+          </div>
+        </div>
+        <div class="view" style="padding-top:24px;">
+          <div class="empty-note" style="text-align:left;background:var(--danger-tint);color:var(--danger);border-color:var(--danger);">
+            <b>⚠ 無法讀取資料庫，畫面已鎖定</b><br><br>
+            剛才嘗試讀取您真實的站別、員工、教材等資料時失敗了。為了保護您的真實資料不被示範資料覆蓋，這個畫面已經整個鎖住，<b>不會做任何儲存動作</b>。<br><br>
+            請檢查網路連線，然後點下面的按鈕重試。如果重試後還是這個畫面，請截圖給開發者確認，先不要繼續操作或嘗試儲存任何內容。
+          </div>
+          <button class="btn btn-primary btn-block" style="margin-top:16px;" onclick="location.reload()">重新整理再試一次</button>
+        </div>
+      </div>`;
+    return;
+  }
 
   if(firebaseConfigMissing){
     app.innerHTML = `
