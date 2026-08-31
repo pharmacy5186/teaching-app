@@ -2292,6 +2292,15 @@ function buildDefaultData(){
 
   return {stations, progress:{}, user:{name:'王小明', role:'實習生'}, employees, roster, codeMap, currentUserId:null, adminPassword:'0000', learningLog:[], progressLocks:{}};
 }
+function withIncidentCategories(data){
+  data.stations.forEach(st=>{
+    if(!st.categories) st.categories = [];
+    if(!st.categories.some(c=>c.isIncident)){
+      st.categories.push({id:uid('c'), title:'異常事件記錄', isIncident:true, items:[]});
+    }
+  });
+  return data;
+}
 
 
 let DB = null;
@@ -2301,7 +2310,7 @@ async function loadDB(){
   const ok = initFirebase();
   if(!ok){
     firebaseConfigMissing = true;
-    DB = buildDefaultData();
+    DB = withIncidentCategories(buildDefaultData());
     return;
   }
   try{
@@ -2312,7 +2321,7 @@ async function loadDB(){
       return;
     }
   }catch(e){ console.error('Firestore 讀取失敗', e); }
-  DB = buildDefaultData();
+  DB = withIncidentCategories(buildDefaultData());
   await persist();
 }
 function migrateDB(){
@@ -2323,6 +2332,7 @@ function migrateDB(){
   if(!DB.adminPassword) DB.adminPassword = '0000';
   if(!DB.learningLog) DB.learningLog = [];
   if(!DB.progressLocks) DB.progressLocks = {};
+  withIncidentCategories(DB);
 }
 async function persist(){
   if(!firebaseReady){ firebaseConfigMissing = true; return; }
@@ -2409,8 +2419,8 @@ async function findTraineesMentoredBy(staffName, date){
 
 function progressKey(stationId, traineeName){ return stationId+'_'+(traineeName||'_shared'); }
 function getChecked(stationId, traineeName){ return DB.progress[progressKey(stationId, traineeName)] || []; }
-function totalItems(station){ return station.categories.reduce((a,c)=>a+c.items.length,0); }
-function checkedCount(station, traineeName){ const arr=getChecked(station.id, traineeName); return station.categories.reduce((a,c)=>a+c.items.filter(i=>arr.includes(i.id)).length,0); }
+function totalItems(station){ return station.categories.filter(c=>!c.isIncident).reduce((a,c)=>a+c.items.length,0); }
+function checkedCount(station, traineeName){ const arr=getChecked(station.id, traineeName); return station.categories.filter(c=>!c.isIncident).reduce((a,c)=>a+c.items.filter(i=>arr.includes(i.id)).length,0); }
 function percentDone(station, traineeName){ if(!traineeName) return 0; const t=totalItems(station); if(!t) return 0; return Math.round(checkedCount(station, traineeName)/t*100); }
 
 async function toggleItem(stationId, itemId, traineeName){
@@ -2740,7 +2750,10 @@ function renderStationDetail(){
       <button class="btn btn-ghost btn-sm" onclick="openImageModal('${tp.id}','${st.id}')">🔎 檢視圖解說明</button>
     </div>`).join('');
 
-  const catBlocks = st.categories.map((cat,ci)=>{
+  const normalCatsForView = st.categories.filter(c=>!c.isIncident);
+  const incidentCatForView = st.categories.find(c=>c.isIncident);
+
+  const catBlocks = normalCatsForView.map((cat,ci)=>{
     const items = cat.items.map(item=>{
       const isChecked = checked.includes(item.id);
       const hasDetail = !!item.detail;
@@ -2767,6 +2780,19 @@ function renderStationDetail(){
     </div>`;
   }).join('');
 
+  const incidentBlock = incidentCatForView ? `
+    <div class="block-title" style="margin-top:22px;color:#8B4A20;">⚠️ 異常事件記錄</div>
+    <p style="font-size:11.5px;color:var(--ink-soft);margin:0 0 10px;">這裡記錄本站曾經發生的異常案例（例如藥品翻倒、機台故障），不算入教學完成度，純粹作為記憶點與提醒。</p>
+    ${incidentCatForView.items.length ? incidentCatForView.items.map(item=>{
+      const hasDetail = !!item.detail;
+      return `
+      <div class="tp-card" style="border-left-color:var(--amber);cursor:${hasDetail?'pointer':'default'};" ${hasDetail?`onclick="openItemModal('${st.id}','${item.id}')"`:''}>
+        <h5>⚠ ${item.text}</h5>
+        ${hasDetail ? `<button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();openItemModal('${st.id}','${item.id}')">查看詳情</button>` : '<p style="font-size:11.5px;color:var(--ink-soft);margin:0;">（尚未填寫詳情）</p>'}
+      </div>`;
+    }).join('') : '<p style="font-size:12px;color:var(--ink-soft);">目前尚無異常事件記錄。</p>'}
+  ` : '';
+
   return `
   <div class="view">
     <div class="back-row">
@@ -2790,6 +2816,8 @@ function renderStationDetail(){
     <div class="block-title" style="margin-top:22px;">📋 工作檢核表</div>
     <div class="hint-banner">💡 請老師確認學生了解後再勾選；項目文字旁有「i」標記者，點擊文字可查看教學小視窗。勾選進度會持續累積，不會每天重置，可以分好幾天完成。</div>
     ${catBlocks || '<p style="font-size:12.5px;color:var(--ink-soft);">尚未設定檢核表，請至後台新增。</p>'}
+
+    ${incidentBlock}
 
     ${canCheck ? `<div class="reset-row"><button onclick="resetStationProgress('${st.id}','${traineeName}')">重新開始「${traineeName}」在本站的檢核進度</button></div>` : ''}
   </div>`;
@@ -2919,7 +2947,9 @@ function renderAdminStations(){
 }
 
 function addStation(){
-  const st = {id:uid('s'), name:'新站別', code:'新站', dayType:S.stationsTab||'weekday', color:'mint', emoji:'🧪', teachingPoints:[], categories:[]};
+  const st = {id:uid('s'), name:'新站別', code:'新站', dayType:S.stationsTab||'weekday', color:'mint', emoji:'🧪', teachingPoints:[], categories:[
+    {id:uid('c'), title:'異常事件記錄', isIncident:true, items:[]}
+  ]};
   DB.stations.push(st);
   S.editingStation = st.id;
   renderApp();
@@ -2945,7 +2975,10 @@ function renderStationEditor(stationId){
       <button class="mini-x" onclick="deleteTeachingPoint('${st.id}','${tp.id}')">✕</button>
     </div>`).join('');
 
-  const catList = st.categories.map((cat,ci)=>`
+  const normalCats = st.categories.filter(c=>!c.isIncident);
+  const incidentCat = st.categories.find(c=>c.isIncident);
+
+  const catList = normalCats.map((cat,ci)=>`
     <div class="card" style="padding:12px;margin-bottom:10px;">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
         <b style="font-size:13px;">${ci+1}. ${cat.title}</b>
@@ -2962,6 +2995,21 @@ function renderStationEditor(stationId){
         </div>`).join('')}
       <button class="btn btn-ghost btn-sm" style="margin-top:4px;" onclick="addItem('${st.id}','${cat.id}')">＋ 新增檢核項目</button>
     </div>`).join('');
+
+  const incidentHtml = incidentCat ? `
+    <div class="card" style="padding:12px;margin-bottom:10px;border:1.5px solid var(--amber);background:var(--amber-tint);">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+        <b style="font-size:13px;color:#7A3F0C;">⚠️ ${incidentCat.title}</b>
+        <span style="font-size:10.5px;color:#8A4A0C;">不算入教學完成度</span>
+      </div>
+      ${incidentCat.items.map(item=>`
+        <div class="admin-item-row" style="background:#fff;">
+          <div class="t">${item.text} ${item.detail?'<span class="pill-tag tag-sky">已記錄詳情</span>':''}</div>
+          <button class="mini-edit" onclick="editItem('${st.id}','${incidentCat.id}','${item.id}')">編輯</button>
+          <button class="mini-x" onclick="deleteItem('${st.id}','${incidentCat.id}','${item.id}')">✕</button>
+        </div>`).join('')}
+      <button class="btn btn-amber btn-sm" style="margin-top:4px;" onclick="addItem('${st.id}','${incidentCat.id}')">＋ 新增異常事件記錄</button>
+    </div>` : '';
 
   return `
     <button class="back-btn" style="margin-bottom:10px;" onclick="S.editingStation=null;renderApp();">← 回站別列表</button>
@@ -2986,6 +3034,9 @@ function renderStationEditor(stationId){
     <div class="subhead">工作檢核表</div>
     ${catList}
     <button class="btn btn-outline btn-block" onclick="addCategory('${st.id}')">＋ 新增檢核分類</button>
+
+    <div class="subhead">異常事件</div>
+    ${incidentHtml}
   `;
 }
 
@@ -3097,6 +3148,8 @@ function renameCategory(stId, catId){
 }
 async function deleteCategory(stId, catId){
   const st = findStation(stId);
+  const cat = st.categories.find(c=>c.id===catId);
+  if(cat && cat.isIncident){ showToast('異常事件記錄分類無法刪除'); return; }
   st.categories = st.categories.filter(c=>c.id!==catId);
   await persist(); renderApp();
 }
