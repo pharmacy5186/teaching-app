@@ -3182,6 +3182,45 @@ async function saveQuizImageIfAny(dataUrl, oldAttId){
   if(oldAttId){ deleteAttachmentDoc(oldAttId).catch(()=>{}); }
   return id;
 }
+function quizAnswerLettersToText(q){
+  return (q.correctAnswers||[]).join('');
+}
+function quizOptionsTextToRaw(q){
+  const letters = quizOptionLetters(q);
+  return letters.map(L=>{
+    const txt = (q.optionsText && q.optionsText[L]) || '';
+    return `${L}. ${txt}`;
+  }).join('\n');
+}
+function exportQuizBankExcel(){
+  const bank = DB.quizBank || [];
+  if(!bank.length){ showToast('目前題庫是空的，沒有資料可以下載'); return; }
+  const header = ['編號','來源檔案','分類/班別','題型','題目','題目圖片','選項文字','選項圖片A','選項圖片B','選項圖片C','選項圖片D','答案','解析'];
+  const rows = bank.map(q=>[
+    q.no || '',
+    q.sourceFile || '',
+    q.category || '',
+    q.type==='multi' ? '複選' : '單選',
+    q.questionText || '',
+    q.questionImage ? '（已有圖片，下載檔不含圖片，請至系統內查看）' : '',
+    quizOptionsTextToRaw(q),
+    q.optionImages && q.optionImages.A ? '（已有圖片）' : '',
+    q.optionImages && q.optionImages.B ? '（已有圖片）' : '',
+    q.optionImages && q.optionImages.C ? '（已有圖片）' : '',
+    q.optionImages && q.optionImages.D ? '（已有圖片）' : '',
+    quizAnswerLettersToText(q),
+    q.explanation || '',
+  ]);
+  const aoa = [header, ...rows];
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, '題庫');
+  const now = new Date();
+  const pad = n=>String(n).padStart(2,'0');
+  const stamp = `${now.getFullYear()}${pad(now.getMonth()+1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}`;
+  XLSX.writeFile(wb, `題庫匯出_${stamp}.xlsx`);
+  showToast(`已下載目前最新題庫共 ${bank.length} 題（文字內容；圖片請至系統內查看，不包含在下載檔中）`);
+}
 async function onQuizFileChange(input){
   const file = input.files && input.files[0];
   input.value = '';
@@ -3323,6 +3362,14 @@ function renderAdminQuiz(){
       <button class="btn btn-primary" ${S.quizImporting?'disabled':''} onclick="document.getElementById('quiz-xlsx-input').click()">${S.quizImporting?'匯入中，請稍候…':'📥 選擇 Excel 檔並匯入'}</button>
       <p style="font-size:11px;color:var(--ink-soft);margin:10px 0 0;">目前題庫共 ${totalQ} 題${missingAnswer?`，其中 <span style="color:var(--danger);font-weight:700;">${missingAnswer} 題尚未設定答案</span>`:''}。</p>
     </div>
+  </div>
+
+  <div class="subhead">下載目前最新題庫</div>
+  <div class="card">
+    <p style="font-size:12px;color:var(--ink-soft);margin:0 0 10px;line-height:1.6;">
+      可將系統目前最新的題庫資料（含後台編輯過、尚未存回 Excel 的內容）下載成 Excel 檔，方便備份或離線查看。下載檔為文字內容，題目與選項的圖片不會包含在檔案中，需至系統內查看。
+    </p>
+    <button class="btn btn-outline btn-block" ${!totalQ?'disabled':''} onclick="exportQuizBankExcel()">📤 下載目前題庫（Excel）</button>
   </div>
 
   <div class="subhead">分類/班別 對應站別</div>
@@ -3517,7 +3564,7 @@ function renderQuizAttemptModal(attemptId){
       <div style="font-size:12.5px;margin-bottom:8px;white-space:pre-line;">${escAttr(q.questionText)}</div>
       ${qImg?`<img class="modal-img" src="${qImg}" style="max-width:160px;margin-bottom:8px;">`:''}
       ${optRows}
-      ${!q.isCorrect && q.explanation ? renderExplanationBlock(q.explanation) : ''}
+      ${q.explanation ? renderExplanationBlock(q.explanation) : ''}
     </div>`;
   }).join('');
   openModal(`
@@ -3564,7 +3611,7 @@ function renderQuizResult(){
       <div style="font-size:13px;margin-bottom:8px;white-space:pre-line;">${escAttr(q.questionText)}</div>
       ${qImg?`<img class="modal-img" src="${qImg}" style="max-width:180px;margin-bottom:8px;">`:''}
       <div style="font-size:12px;color:var(--ink-soft);margin-bottom:4px;">你的答案：${d.picked.length?d.picked.join('、'):'（未作答）'}　|　正確答案：${(q.correctAnswers||[]).join('、')}</div>
-      ${!d.isCorrect && q.explanation ? renderExplanationBlock(q.explanation) : ''}
+      ${q.explanation ? renderExplanationBlock(q.explanation) : ''}
     </div>`;
   }).join('');
   return `
