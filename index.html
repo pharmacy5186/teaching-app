@@ -243,9 +243,10 @@ p.page-sub{margin:0 0 16px;color:var(--ink-soft);font-size:13px;}
   padding:11px 12px;margin-bottom:8px;
 }
 .check-row.important{border-color:#EBC3B7;background:#FEFAF8;}
-.check-row input[type=checkbox]{
+.check-row input[type=checkbox],.check-row input[type=radio]{
   width:20px;height:20px;margin-top:1px;accent-color:var(--primary);flex-shrink:0;cursor:pointer;
 }
+.quiz-score-big{font-family:var(--font-display);font-size:28px;font-weight:700;color:#fff;margin:0 0 2px;}
 .check-row .txt{flex:1;cursor:pointer;}
 .check-row .txt .line{font-size:13px;line-height:1.45;white-space:pre-line;}
 .check-row.checked{background:var(--mint);border-color:var(--primary);}
@@ -383,6 +384,8 @@ table.sched-table td:nth-child(4),table.sched-table th:nth-child(4){white-space:
 </style>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.4.120/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <script>
   if(window.pdfjsLib){
     pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.4.120/pdf.worker.min.js';
@@ -2291,7 +2294,7 @@ function buildDefaultData(){
   const employees = employeeSeed.map(e => ({id:uid('emp'), empNo:e.empNo, name:e.name, role:e.role}));
   const roster = [];
 
-  return {stations, progress:{}, user:{name:'王小明', role:'實習生'}, employees, roster, codeMap, currentUserId:null, adminPassword:'0000', learningLog:[], progressLocks:{}};
+  return {stations, progress:{}, user:{name:'王小明', role:'實習生'}, employees, roster, codeMap, currentUserId:null, adminPassword:'0000', learningLog:[], progressLocks:{}, quizBank:[], quizCategoryMap:[], quizAttempts:[]};
 }
 function withIncidentCategories(data){
   data.stations.forEach(st=>{
@@ -2370,6 +2373,9 @@ function migrateDB(){
   if(!DB.adminPassword) DB.adminPassword = '0000';
   if(!DB.learningLog) DB.learningLog = [];
   if(!DB.progressLocks) DB.progressLocks = {};
+  if(!DB.quizBank) DB.quizBank = [];
+  if(!DB.quizCategoryMap) DB.quizCategoryMap = [];
+  if(!DB.quizAttempts) DB.quizAttempts = [];
   withIncidentCategories(DB);
 }
 const BACKUPS_COLLECTION = 'pharmacy_teaching_app_backups';
@@ -2414,7 +2420,8 @@ async function persist(){
 /* =========================================================
    狀態
    ========================================================= */
-const S = { view:'today', stationId:null, stationViewDate:null, adminTab:'stations', editingStation:null, editingItem:null, stationsTab:'weekday', adminUnlocked:false, progressTraineeName:null, historyTraineeFilter:'', todayLoading:false, todayAuto:null, todayAutoTmr:null, todayMentoring:null, stationMentorMatch:null, stationMatchLoading:false, backupLoading:false, backupList:null };
+const S = { view:'today', stationId:null, stationViewDate:null, adminTab:'stations', editingStation:null, editingItem:null, stationsTab:'weekday', adminUnlocked:false, progressTraineeName:null, historyTraineeFilter:'', todayLoading:false, todayAuto:null, todayAutoTmr:null, todayMentoring:null, stationMentorMatch:null, stationMatchLoading:false, backupLoading:false, backupList:null, quiz:null, quizImporting:false };
+window.__quizImgCache = {};
 
 function findStation(id){ return DB.stations.find(s=>s.id===id); }
 
@@ -2681,7 +2688,14 @@ function renderTodayTrainee(user){
     ${shiftCards}
     <div class="section-label"><span>🔭 明日預告</span><div class="dash"></div></div>
     ${preview}
+    <div class="section-label"><span>📝 我的考核紀錄</span><div class="dash"></div></div>
+    ${renderMyQuizAttempts(user.name)}
   </div>`;
+}
+function renderMyQuizAttempts(name){
+  const attempts = traineeQuizAttempts(name);
+  if(!attempts.length) return `<p style="font-size:12.5px;color:var(--ink-soft);">目前還沒有考核紀錄，完成站別教學後可以到站別頁面進行考核。</p>`;
+  return attempts.map(renderQuizAttemptRow).join('');
 }
 
 function renderTodayStaff(user){
@@ -2884,6 +2898,8 @@ function renderStationDetail(){
 
     ${isLocked ? lockedBanner : (traineeName ? readonlyBanner : '')}
 
+    <button class="btn btn-amber btn-block" style="margin-bottom:18px;" onclick="startStationQuiz('${st.id}')">📝 站別考核（隨機抽 5 題）</button>
+
     <div class="block-title">📖 務必教學重點</div>
     ${tpCards || '<p style="font-size:12.5px;color:var(--ink-soft);">尚未設定教學重點，請至後台新增。</p>'}
 
@@ -2981,6 +2997,605 @@ async function openImageModal(tpId, stationId){
 }
 
 /* =========================================================
+   題庫管理 / 站別考核（QUIZ）
+   ========================================================= */
+function quizOptionLetters(q){
+  const set = new Set();
+  if(q.optionsText) Object.keys(q.optionsText).forEach(k=>{ if(q.optionsText[k]) set.add(k); });
+  if(q.optionImages) Object.keys(q.optionImages).forEach(k=>{ if(q.optionImages[k]) set.add(k); });
+  return Array.from(set).sort();
+}
+function quizCategories(){
+  const set = new Set();
+  (DB.quizBank||[]).forEach(q=>{ if(q.category) set.add(q.category); });
+  return Array.from(set).sort();
+}
+function getCategoryStationIds(category){
+  const m = (DB.quizCategoryMap||[]).find(x=>x.category===category);
+  return m ? m.stationIds : [];
+}
+function stationQuizCategories(stationId){
+  return (DB.quizCategoryMap||[]).filter(m=>(m.stationIds||[]).includes(stationId)).map(m=>m.category);
+}
+function toggleCategoryStation(category, stationId){
+  if(!DB.quizCategoryMap) DB.quizCategoryMap=[];
+  let m = DB.quizCategoryMap.find(x=>x.category===category);
+  if(!m){ m={category, stationIds:[]}; DB.quizCategoryMap.push(m); }
+  const idx = m.stationIds.indexOf(stationId);
+  if(idx>-1) m.stationIds.splice(idx,1); else m.stationIds.push(stationId);
+  persist(); renderApp();
+}
+async function prefetchQuizImages(questions){
+  window.__quizImgCache = window.__quizImgCache || {};
+  const ids = [];
+  (questions||[]).forEach(q=>{
+    if(q.questionImage) ids.push(q.questionImage);
+    if(q.optionImages) Object.values(q.optionImages).forEach(v=>{ if(v) ids.push(v); });
+  });
+  const need = [...new Set(ids)].filter(id=>!window.__quizImgCache[id]);
+  await Promise.all(need.map(async id=>{
+    try{ const doc = await loadAttachmentDoc(id); if(doc && doc.data) window.__quizImgCache[id]=doc.data; }
+    catch(e){ console.error('讀取題庫圖片失敗', e); }
+  }));
+}
+
+/* ---- Excel（含內嵌圖片）匯入解析 ---- */
+function xmlAttr(tag, name){
+  if(!tag) return null;
+  const m = tag.match(new RegExp(name+'="([^"]*)"'));
+  return m ? m[1] : null;
+}
+function zipResolvePath(fromFile, target){
+  if(/^\//.test(target)) return target.replace(/^\//,'');
+  const parts = fromFile.split('/'); parts.pop();
+  target.split('/').forEach(p=>{
+    if(p==='..') parts.pop(); else if(p!=='.' && p!=='') parts.push(p);
+  });
+  return parts.join('/');
+}
+function zipRelsPathFor(path){
+  const idx = path.lastIndexOf('/');
+  const dir = path.slice(0,idx), file = path.slice(idx+1);
+  return dir+'/_rels/'+file+'.rels';
+}
+function mimeForPath(path){
+  const ext = (path.split('.').pop()||'').toLowerCase();
+  return {png:'image/png',jpg:'image/jpeg',jpeg:'image/jpeg',gif:'image/gif',bmp:'image/bmp',webp:'image/webp'}[ext] || 'image/png';
+}
+async function extractXlsxImages(zip, sheetIndex){
+  // 回傳 { rowIndex: { colIndex: dataURL } }（row/col 皆為 0-based，對應 SheetJS 以 header:1 讀出的陣列索引）
+  const result = {};
+  try{
+    const wbXml = await zip.file('xl/workbook.xml').async('text');
+    const wbRelsFile = zip.file('xl/_rels/workbook.xml.rels');
+    if(!wbRelsFile) return result;
+    const wbRelsXml = await wbRelsFile.async('text');
+    const sheetTags = wbXml.match(/<sheet\b[^>]*>/g) || [];
+    const sheetRid = xmlAttr(sheetTags[sheetIndex]||'', 'r:id');
+    if(!sheetRid) return result;
+    const relTags = wbRelsXml.match(/<Relationship\b[^>]*>/g) || [];
+    const rel = relTags.map(t=>({id:xmlAttr(t,'Id'), target:xmlAttr(t,'Target')})).find(r=>r.id===sheetRid);
+    if(!rel) return result;
+    const sheetPath = zipResolvePath('xl/workbook.xml', rel.target);
+    const sheetRelsPath = zipRelsPathFor(sheetPath);
+    const sheetRelsFile = zip.file(sheetRelsPath);
+    if(!sheetRelsFile) return result;
+    const sheetRelsXml = await sheetRelsFile.async('text');
+    const sRelTags = sheetRelsXml.match(/<Relationship\b[^>]*>/g) || [];
+    const drawRel = sRelTags.map(t=>({target:xmlAttr(t,'Target')})).find(r=>r.target && r.target.indexOf('drawing')>-1);
+    if(!drawRel) return result;
+    const drawingPath = zipResolvePath(sheetPath, drawRel.target);
+    const drawingFile = zip.file(drawingPath);
+    if(!drawingFile) return result;
+    const drawingXml = await drawingFile.async('text');
+    const drawingRelsPath = zipRelsPathFor(drawingPath);
+    const drawingRelsFile = zip.file(drawingRelsPath);
+    if(!drawingRelsFile) return result;
+    const drawingRelsXml = await drawingRelsFile.async('text');
+    const dRelTags = drawingRelsXml.match(/<Relationship\b[^>]*>/g) || [];
+    const embedMap = {};
+    dRelTags.forEach(t=>{ const id=xmlAttr(t,'Id'), target=xmlAttr(t,'Target'); if(id&&target) embedMap[id]=zipResolvePath(drawingPath, target); });
+    const anchorBlocks = drawingXml.match(/<xdr:(?:twoCellAnchor|oneCellAnchor)\b[\s\S]*?<\/xdr:(?:twoCellAnchor|oneCellAnchor)>/g) || [];
+    for(const block of anchorBlocks){
+      const fromMatch = block.match(/<xdr:from>[\s\S]*?<xdr:col>(\d+)<\/xdr:col>[\s\S]*?<xdr:row>(\d+)<\/xdr:row>[\s\S]*?<\/xdr:from>/);
+      const embedMatch = block.match(/r:embed="(rId\d+)"/);
+      if(!fromMatch || !embedMatch) continue;
+      const col = parseInt(fromMatch[1],10), row = parseInt(fromMatch[2],10);
+      const mediaPath = embedMap[embedMatch[1]];
+      if(!mediaPath) continue;
+      const mediaFile = zip.file(mediaPath);
+      if(!mediaFile) continue;
+      const base64 = await mediaFile.async('base64');
+      const dataUrl = 'data:'+mimeForPath(mediaPath)+';base64,'+base64;
+      if(!result[row]) result[row]={};
+      result[row][col] = dataUrl;
+    }
+  }catch(e){ console.error('題庫 Excel 圖片解析失敗（文字部分仍會正常匯入）', e); }
+  return result;
+}
+function parseQuizOptionsText(raw){
+  const out = {};
+  if(!raw) return out;
+  String(raw).split(/\r?\n/).forEach(line=>{
+    const m = line.match(/^\s*([A-Za-z])[\.\)、．：:]\s*(.*)$/);
+    if(m) out[m[1].toUpperCase()] = m[2].trim();
+  });
+  return out;
+}
+async function parseQuizExcel(file){
+  const buf = await file.arrayBuffer();
+  const wb = XLSX.read(buf, {type:'array'});
+  const sheetName = wb.SheetNames.find(n=>n.indexOf('說明')===-1) || wb.SheetNames[0];
+  const sheetIndex = wb.SheetNames.indexOf(sheetName);
+  const ws = wb.Sheets[sheetName];
+  const aoa = XLSX.utils.sheet_to_json(ws, {header:1, defval:''});
+  if(!aoa.length) throw new Error('工作表是空的');
+  const header = aoa[0].map(h=>String(h==null?'':h).trim());
+  const need = ['編號','來源檔案','分類/班別','題型','題目','題目圖片','選項文字','選項圖片A','選項圖片B','選項圖片C','選項圖片D','答案','解析'];
+  const colIdx = {};
+  need.forEach(name=>{ colIdx[name] = header.indexOf(name); });
+  if(colIdx['編號']===-1 || colIdx['題目']===-1){
+    throw new Error('Excel 欄位格式不符，請確認欄位名稱（編號、題目…）與範本一致');
+  }
+  const zip = await JSZip.loadAsync(buf);
+  const images = await extractXlsxImages(zip, sheetIndex);
+  const questions = [];
+  for(let r=1;r<aoa.length;r++){
+    const row = aoa[r];
+    if(!row || !row.some(c=>String(c==null?'':c).trim()!=='')) continue;
+    const get = (name)=> colIdx[name]>-1 ? String(row[colIdx[name]]==null?'':row[colIdx[name]]).trim() : '';
+    const no = get('編號');
+    if(!no) continue;
+    const rowImages = images[r] || {};
+    questions.push({
+      no,
+      sourceFile: get('來源檔案'),
+      category: get('分類/班別'),
+      type: get('題型')==='複選' ? 'multi' : 'single',
+      questionText: get('題目'),
+      questionImageData: colIdx['題目圖片']>-1 ? (rowImages[colIdx['題目圖片']]||null) : null,
+      optionsText: parseQuizOptionsText(get('選項文字')),
+      optionImageData: {
+        A: colIdx['選項圖片A']>-1 ? (rowImages[colIdx['選項圖片A']]||null) : null,
+        B: colIdx['選項圖片B']>-1 ? (rowImages[colIdx['選項圖片B']]||null) : null,
+        C: colIdx['選項圖片C']>-1 ? (rowImages[colIdx['選項圖片C']]||null) : null,
+        D: colIdx['選項圖片D']>-1 ? (rowImages[colIdx['選項圖片D']]||null) : null,
+      },
+      answerText: get('答案'),
+      explanation: get('解析'),
+    });
+  }
+  return questions;
+}
+function parseQuizAnswerLetters(raw, validLetters){
+  if(!raw) return [];
+  const letters = String(raw).toUpperCase().match(/[A-Z]/g) || [];
+  const allowed = validLetters && validLetters.length ? validLetters : ['A','B','C','D'];
+  const out = [];
+  letters.forEach(L=>{ if(allowed.includes(L) && !out.includes(L)) out.push(L); });
+  return out;
+}
+async function saveQuizImageIfAny(dataUrl, oldAttId){
+  if(!dataUrl){ return oldAttId || null; }
+  const id = uid('qimg');
+  await saveAttachmentDoc(id, {type:'image', name:'題庫圖片', data:dataUrl});
+  if(oldAttId){ deleteAttachmentDoc(oldAttId).catch(()=>{}); }
+  return id;
+}
+async function onQuizFileChange(input){
+  const file = input.files && input.files[0];
+  input.value = '';
+  if(!file) return;
+  S.quizImporting = true; renderApp();
+  try{
+    const parsed = await parseQuizExcel(file);
+    let added=0, updated=0, answeredFromExcel=0;
+    for(const q of parsed){
+      const existingIdx = DB.quizBank.findIndex(x=>x.no===q.no);
+      const existing = existingIdx>-1 ? DB.quizBank[existingIdx] : null;
+      const questionImage = await saveQuizImageIfAny(q.questionImageData, existing && existing.questionImage);
+      const optionImages = {};
+      for(const L of ['A','B','C','D']){
+        optionImages[L] = await saveQuizImageIfAny(q.optionImageData[L], existing && existing.optionImages && existing.optionImages[L]);
+      }
+      const validLetters = Object.keys(q.optionsText||{}).concat(Object.keys(q.optionImageData||{}).filter(L=>q.optionImageData[L]));
+      const answerLetters = parseQuizAnswerLetters(q.answerText, validLetters.length ? [...new Set(validLetters)] : null);
+      const type = answerLetters.length>1 ? 'multi' : q.type;
+      const record = {
+        id: existing ? existing.id : uid('q'),
+        no: q.no, sourceFile: q.sourceFile, category: q.category, type,
+        questionText: q.questionText, questionImage,
+        optionsText: q.optionsText, optionImages,
+        explanation: q.explanation,
+        correctAnswers: answerLetters.length ? answerLetters : (existing ? (existing.correctAnswers||[]) : []),
+        active: existing ? (existing.active!==false) : true,
+      };
+      if(answerLetters.length) answeredFromExcel++;
+      if(existingIdx>-1){ DB.quizBank[existingIdx]=record; updated++; }
+      else { DB.quizBank.push(record); added++; }
+    }
+    await persist();
+    showToast(`匯入完成：新增 ${added} 題、更新 ${updated} 題（其中 ${answeredFromExcel} 題已從 Excel 帶入答案）`);
+  }catch(e){
+    console.error('題庫匯入失敗', e);
+    showToast('匯入失敗：'+(e&&e.message?e.message:'請確認檔案格式'));
+  }
+  S.quizImporting = false;
+  renderApp();
+}
+async function openQuizQuestionEditor(qId){
+  const q = DB.quizBank.find(x=>x.id===qId);
+  if(!q) return;
+  openModal(`<div class="modal-top"><h4>編輯題目 ${q.no}</h4><button class="modal-close" onclick="closeModal()">✕</button></div><p style="font-size:12px;color:var(--ink-soft);text-align:center;padding:16px 0;">載入中…</p>`);
+  await prefetchQuizImages([q]);
+  renderQuizEditorModal(q.id);
+}
+function renderQuizEditorModal(qId){
+  const q = DB.quizBank.find(x=>x.id===qId);
+  if(!q) return;
+  const letters = quizOptionLetters(q).length ? quizOptionLetters(q) : ['A','B','C','D'];
+  openModal(`
+    <div class="modal-top"><h4>編輯題目 ${q.no}</h4><button class="modal-close" onclick="closeModal()">✕</button></div>
+    <div class="form-group"><label>分類/班別</label><input type="text" id="qe-category" value="${escAttr(q.category)}"></div>
+    <div class="form-group"><label>題型</label>
+      <select id="qe-type">
+        <option value="single" ${q.type==='single'?'selected':''}>單選</option>
+        <option value="multi" ${q.type==='multi'?'selected':''}>複選</option>
+      </select>
+    </div>
+    <div class="form-group"><label>題目</label><textarea id="qe-question">${escAttr(q.questionText)}</textarea></div>
+    ${q.questionImage && window.__quizImgCache[q.questionImage] ? `<img class="modal-img" src="${window.__quizImgCache[q.questionImage]}" style="max-width:160px;">` : ''}
+    <div class="form-group"><label>正確答案（勾選，複選題可勾多個）</label>
+      <div style="display:flex;flex-wrap:wrap;gap:10px;">
+        ${letters.map(L=>{
+          const txt = (q.optionsText&&q.optionsText[L]) || '';
+          const img = (q.optionImages&&q.optionImages[L]) ? window.__quizImgCache[q.optionImages[L]] : null;
+          const checked = (q.correctAnswers||[]).includes(L);
+          return `<label style="display:flex;align-items:center;gap:6px;border:1.5px solid ${checked?'var(--primary)':'var(--line)'};border-radius:10px;padding:8px 10px;">
+            <input type="checkbox" class="qe-answer" value="${L}" ${checked?'checked':''}>
+            <span style="font-size:12.5px;">${L}${txt?`：${escAttr(txt)}`:''}</span>
+            ${img?`<img src="${img}" style="width:36px;height:36px;object-fit:cover;border-radius:6px;">`:''}
+          </label>`;
+        }).join('')}
+      </div>
+    </div>
+    <div class="form-group"><label>解析</label><textarea id="qe-explanation">${escAttr(q.explanation)}</textarea></div>
+    <div class="chk-inline"><input type="checkbox" id="qe-active" ${q.active!==false?'checked':''}><label for="qe-active" style="margin:0;">啟用（納入隨機抽題）</label></div>
+    <button class="btn btn-primary btn-block" onclick="saveQuizQuestionEdit('${q.id}')">儲存</button>
+  `);
+}
+function saveQuizQuestionEdit(qId){
+  const q = DB.quizBank.find(x=>x.id===qId);
+  if(!q) return;
+  q.category = document.getElementById('qe-category').value.trim();
+  q.type = document.getElementById('qe-type').value;
+  q.questionText = document.getElementById('qe-question').value;
+  q.explanation = document.getElementById('qe-explanation').value;
+  q.active = document.getElementById('qe-active').checked;
+  let selected = Array.from(document.querySelectorAll('.qe-answer:checked')).map(el=>el.value);
+  if(q.type==='single' && selected.length>1) selected = [selected[0]];
+  q.correctAnswers = selected;
+  persist();
+  closeModal();
+  showToast('已儲存這一題');
+}
+async function deleteQuizQuestion(qId){
+  if(!confirm('確定要刪除這一題嗎？此動作無法復原。')) return;
+  const idx = DB.quizBank.findIndex(x=>x.id===qId);
+  if(idx===-1) return;
+  const q = DB.quizBank[idx];
+  const imgIds = [q.questionImage, ...(q.optionImages?Object.values(q.optionImages):[])].filter(Boolean);
+  DB.quizBank.splice(idx,1);
+  await persist();
+  renderApp();
+  imgIds.forEach(id=>deleteAttachmentDoc(id).catch(()=>{}));
+}
+function renderAdminQuizRow(q){
+  const hasAnswer = q.correctAnswers && q.correctAnswers.length;
+  return `
+    <div class="admin-item-row" style="align-items:flex-start;">
+      <div class="t">
+        <div style="font-family:var(--font-mono);font-size:10.5px;color:var(--ink-soft);">${q.no} · ${q.type==='multi'?'複選':'單選'}${q.active===false?' · 已停用':''}</div>
+        <div style="font-size:12.5px;margin-top:2px;">${escAttr((q.questionText||'（無題目文字）').slice(0,44))}</div>
+        <div style="margin-top:4px;"><span class="pill-tag ${hasAnswer?'tag-mint':'tag-peach'}">${hasAnswer?'✅ 已設定答案':'⚠️ 未設定答案'}</span></div>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:4px;">
+        <button class="mini-edit" onclick="openQuizQuestionEditor('${q.id}')">編輯</button>
+        <button class="mini-x" onclick="deleteQuizQuestion('${q.id}')">刪除</button>
+      </div>
+    </div>`;
+}
+function renderAdminQuiz(){
+  const cats = quizCategories();
+  const bank = DB.quizBank||[];
+  const totalQ = bank.length;
+  const missingAnswer = bank.filter(q=>!q.correctAnswers || !q.correctAnswers.length).length;
+  const uncategorized = bank.filter(q=>!q.category);
+  return `
+  <div class="subhead">匯入題庫（Excel，含圖片）</div>
+  <div class="card">
+    <p style="font-size:12px;color:var(--ink-soft);margin:0 0 10px;line-height:1.6;">
+      請上傳依範本格式製作的 Excel 檔（欄位：編號、來源檔案、分類/班別、題型、題目、題目圖片、選項文字、選項圖片A–D、答案、解析）。系統會自動抓取內嵌圖片，並依「編號」建立或更新題目（同編號會覆蓋更新，不會重複）。<br>
+      若 Excel 的「答案」欄有填寫（例如單選填一個字母 A，複選填多個字母如 AC），系統會自動帶入為正確答案；若某題答案欄是空的，匯入後請到下方題目清單手動設定，該題才會出現在學員的隨機考核中。
+    </p>
+    <div class="csv-box">
+      <input type="file" id="quiz-xlsx-input" accept=".xlsx" style="display:none" onchange="onQuizFileChange(this)">
+      <button class="btn btn-primary" ${S.quizImporting?'disabled':''} onclick="document.getElementById('quiz-xlsx-input').click()">${S.quizImporting?'匯入中，請稍候…':'📥 選擇 Excel 檔並匯入'}</button>
+      <p style="font-size:11px;color:var(--ink-soft);margin:10px 0 0;">目前題庫共 ${totalQ} 題${missingAnswer?`，其中 <span style="color:var(--danger);font-weight:700;">${missingAnswer} 題尚未設定答案</span>`:''}。</p>
+    </div>
+  </div>
+
+  <div class="subhead">分類/班別 對應站別</div>
+  <div class="card">
+    <p style="font-size:11.5px;color:var(--ink-soft);margin:0 0 10px;">請勾選每個題庫分類要出現在哪些站別的考核中（一個分類可以對應多個站別；學員在某站別點選「站別考核」時，會從對應的分類中隨機抽題）。</p>
+    ${cats.length ? cats.map(cat=>`
+      <div style="margin-bottom:14px;">
+        <div style="font-weight:700;font-size:12.5px;margin-bottom:6px;">「${escAttr(cat)}」</div>
+        <div style="display:flex;flex-wrap:wrap;gap:6px;">
+          ${DB.stations.map(st=>{
+            const on = getCategoryStationIds(cat).includes(st.id);
+            return `<button class="btn btn-sm ${on?'btn-primary':'btn-ghost'}" onclick="toggleCategoryStation('${escAttr(cat)}','${st.id}')">${st.emoji} ${st.name}</button>`;
+          }).join('')}
+        </div>
+      </div>
+    `).join('') : '<p style="font-size:12px;color:var(--ink-soft);">尚未匯入任何題庫，或匯入的題目都沒有標註分類。</p>'}
+  </div>
+
+  <div class="subhead">題目清單</div>
+  ${cats.map(cat=>`
+    <div class="card">
+      <div style="font-weight:700;font-size:13px;margin-bottom:8px;">${escAttr(cat)}（${bank.filter(q=>q.category===cat).length} 題）</div>
+      ${bank.filter(q=>q.category===cat).map(renderAdminQuizRow).join('')}
+    </div>
+  `).join('')}
+  ${uncategorized.length ? `
+    <div class="card">
+      <div style="font-weight:700;font-size:13px;margin-bottom:8px;">未標註分類（${uncategorized.length} 題，不會出現在任何站別考核中）</div>
+      ${uncategorized.map(renderAdminQuizRow).join('')}
+    </div>` : ''}
+  ${!bank.length ? '<p style="font-size:12.5px;color:var(--ink-soft);">尚未匯入任何題庫。</p>' : ''}`;
+}
+
+/* ---- 學員作答 ---- */
+function shuffleArray(arr){
+  const a = arr.slice();
+  for(let i=a.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); [a[i],a[j]]=[a[j],a[i]]; }
+  return a;
+}
+// 把解析文字拆成「一個選項一行」：
+// 1) 原本就用換行分開的各選項說明（例如「A. xxx\nB. xxx」）會各自成一行。
+// 2) 同一行內用「(A)(B)(D)xxx」或「A/B. xxx」這種方式把多個選項寫在一起說明時，
+//    會拆成 A、B、D 各自獨立一行，並且都完整帶上同一段說明文字（不是只留代號）。
+// 3) 沒有標示選項代號的一般敘述（例如整段說明跟特定選項無關），維持原樣一行。
+function formatExplanationParagraphs(text){
+  if(!text) return [];
+  const rawLines = String(text).split(/\r?\n/).map(s=>s.trim()).filter(Boolean);
+  const out = [];
+  rawLines.forEach(line=>{
+    const re = /(?:\([A-Za-z]\))+/g;
+    let m, matches = [];
+    while((m = re.exec(line))){ matches.push({index:m.index, text:m[0]}); }
+    if(matches.length){
+      if(matches[0].index>0){
+        const lead = line.slice(0, matches[0].index).trim();
+        if(lead) out.push(lead);
+      }
+      matches.forEach((mt,i)=>{
+        const start = mt.index, end = i+1<matches.length ? matches[i+1].index : line.length;
+        const letters = mt.text.match(/[A-Za-z]/g) || [];
+        const body = line.slice(start+mt.text.length, end).trim();
+        letters.forEach(L=> out.push(body ? `${L}：${body}` : `${L}`));
+      });
+      return;
+    }
+    const single = line.match(/^([A-Za-z](?:[\/,、][A-Za-z])*)[\.\)、．：:]\s*(.*)$/);
+    if(single){
+      const letters = single[1].split(/[\/,、]/).filter(Boolean);
+      const body = single[2].trim();
+      letters.forEach(L=> out.push(body ? `${L}：${body}` : `${L}`));
+      return;
+    }
+    out.push(line);
+  });
+  return out.filter(Boolean);
+}
+function renderExplanationBlock(text){
+  const paras = formatExplanationParagraphs(text);
+  if(!paras.length) return '';
+  return `<div class="hint-banner" style="background:var(--sky);color:var(--sky-ink);margin-top:8px;display:block;">
+    <b>解析：</b>
+    ${paras.map(p=>`<div style="margin-top:4px;">${escAttr(p)}</div>`).join('')}
+  </div>`;
+}
+async function startStationQuiz(stationId){
+  const cats = stationQuizCategories(stationId);
+  if(!cats.length){ showToast('本站尚未設定題庫分類對應，請聯絡管理者到後台「題庫管理」設定'); return; }
+  const pool = (DB.quizBank||[]).filter(q=> cats.includes(q.category) && q.active!==false && q.correctAnswers && q.correctAnswers.length);
+  if(!pool.length){ showToast('本站題庫目前沒有可用的題目（尚未設定正確答案）'); return; }
+  const picked = shuffleArray(pool).slice(0, Math.min(5, pool.length));
+  showToast('載入考題中…');
+  await prefetchQuizImages(picked);
+  S.quiz = { stationId, questions: picked, answers:{}, submitted:false, result:null };
+  S.view = 'quiz';
+  renderApp();
+  window.scrollTo(0,0);
+}
+function selectQuizAnswer(qId, letter, type){
+  if(!S.quiz || S.quiz.submitted) return;
+  const arr = S.quiz.answers[qId] ? S.quiz.answers[qId].slice() : [];
+  if(type==='multi'){
+    const idx = arr.indexOf(letter);
+    if(idx>-1) arr.splice(idx,1); else arr.push(letter);
+  }else{
+    arr.length = 0; arr.push(letter);
+  }
+  S.quiz.answers[qId] = arr;
+  renderApp();
+}
+function submitQuiz(){
+  const quiz = S.quiz;
+  if(!quiz || quiz.submitted) return;
+  let score = 0;
+  const detail = quiz.questions.map(q=>{
+    const picked = (quiz.answers[q.id]||[]).slice().sort();
+    const correct = (q.correctAnswers||[]).slice().sort();
+    const isCorrect = picked.length===correct.length && picked.every((v,i)=>v===correct[i]);
+    if(isCorrect) score++;
+    return {qId:q.id, isCorrect, picked};
+  });
+  quiz.submitted = true;
+  quiz.result = {score, total: quiz.questions.length, detail};
+  const user = currentUser();
+  const st = findStation(quiz.stationId);
+  if(!DB.quizAttempts) DB.quizAttempts=[];
+  // 把每題的完整內容（題目/選項/圖片參照/正確答案/作答內容/解析）存成快照，
+  // 這樣即使之後題庫被修改或刪除，學員與管理者仍能回顧當初考核的完整內容與錯題解析。
+  DB.quizAttempts.push({
+    id:uid('qa'),
+    stationId:quiz.stationId,
+    stationName: st?st.name:'（未知站別）',
+    traineeName: user?user.name:'',
+    score, total: quiz.questions.length,
+    date: todayStr(), ts: Date.now(),
+    questions: quiz.questions.map(q=>{
+      const d = detail.find(x=>x.qId===q.id);
+      return {
+        qId:q.id, category:q.category, type:q.type,
+        questionText:q.questionText, questionImage:q.questionImage,
+        optionsText:q.optionsText, optionImages:q.optionImages,
+        correctAnswers:(q.correctAnswers||[]).slice(),
+        picked: d.picked, isCorrect: d.isCorrect,
+        explanation:q.explanation,
+      };
+    }),
+  });
+  persist();
+  renderApp();
+  window.scrollTo(0,0);
+}
+function exitQuiz(){ S.quiz=null; S.view='station-detail'; renderApp(); window.scrollTo(0,0); }
+
+/* ---- 考核紀錄（給學員首頁 + 後台學習歷程共用）---- */
+function traineeQuizAttempts(name){
+  return (DB.quizAttempts||[]).filter(a=>a.traineeName===name).sort((a,b)=>b.ts-a.ts);
+}
+function renderQuizAttemptRow(a){
+  const wrongCount = a.total - a.score;
+  return `
+  <div class="admin-item-row">
+    <div class="t">${escAttr(a.date)} · ${escAttr(a.stationName)}　<b>${a.score}/${a.total}</b>${wrongCount>0?` <span class="pill-tag tag-peach">${wrongCount} 題錯</span>`:' <span class="pill-tag tag-mint">全對</span>'}</div>
+    <button class="mini-edit" onclick="openQuizAttemptReview('${a.id}')">查看詳情</button>
+  </div>`;
+}
+async function openQuizAttemptReview(attemptId){
+  const a = (DB.quizAttempts||[]).find(x=>x.id===attemptId);
+  if(!a) return;
+  openModal(`<div class="modal-top"><h4>${escAttr(a.stationName)} 考核紀錄</h4><button class="modal-close" onclick="closeModal()">✕</button></div><p style="font-size:12px;color:var(--ink-soft);text-align:center;padding:16px 0;">載入中…</p>`);
+  await prefetchQuizImages(a.questions||[]);
+  renderQuizAttemptModal(attemptId);
+}
+function renderQuizAttemptModal(attemptId){
+  const a = (DB.quizAttempts||[]).find(x=>x.id===attemptId);
+  if(!a) return;
+  const pct = Math.round(a.score/a.total*100);
+  const rows = (a.questions||[]).map((q,i)=>{
+    const letters = quizOptionLetters(q);
+    const qImg = q.questionImage ? window.__quizImgCache[q.questionImage] : null;
+    const optRows = letters.map(L=>{
+      const txt = (q.optionsText&&q.optionsText[L]) || '';
+      const img = (q.optionImages&&q.optionImages[L]) ? window.__quizImgCache[q.optionImages[L]] : null;
+      const wasPicked = (q.picked||[]).includes(L);
+      const isRight = (q.correctAnswers||[]).includes(L);
+      let mark = '';
+      if(isRight) mark = ' style="color:var(--primary);font-weight:700;"';
+      else if(wasPicked) mark = ' style="color:var(--danger);font-weight:700;"';
+      return `<div class="line"${mark}>${wasPicked?'☑':'☐'} ${L}${txt?`. ${escAttr(txt)}`:''}${isRight?'（正解）':''}${img?`<br><img src="${img}" style="max-width:100px;border-radius:6px;margin-top:4px;">`:''}</div>`;
+    }).join('');
+    return `
+    <div class="card" style="border-left:4px solid ${q.isCorrect?'var(--primary)':'var(--danger)'};margin-bottom:10px;">
+      <div style="font-weight:700;font-size:12.5px;margin-bottom:6px;">第 ${i+1} 題　${q.isCorrect?'✅ 答對':'❌ 答錯'}</div>
+      <div style="font-size:12.5px;margin-bottom:8px;white-space:pre-line;">${escAttr(q.questionText)}</div>
+      ${qImg?`<img class="modal-img" src="${qImg}" style="max-width:160px;margin-bottom:8px;">`:''}
+      ${optRows}
+      ${!q.isCorrect && q.explanation ? renderExplanationBlock(q.explanation) : ''}
+    </div>`;
+  }).join('');
+  openModal(`
+    <div class="modal-top"><h4>${escAttr(a.stationName)} 考核紀錄</h4><button class="modal-close" onclick="closeModal()">✕</button></div>
+    <p style="font-size:12px;color:var(--ink-soft);margin:0 0 10px;">${escAttr(a.date)} · 成績 ${a.score}/${a.total}（${pct}%）</p>
+    ${rows}
+  `);
+}
+function renderQuizQuestionCard(q, idx){
+  const letters = quizOptionLetters(q);
+  const picked = (S.quiz.answers[q.id]) || [];
+  const qImg = q.questionImage ? window.__quizImgCache[q.questionImage] : null;
+  return `
+  <div class="card">
+    <div style="font-weight:700;font-size:13.5px;margin-bottom:8px;">第 ${idx+1} 題　${q.type==='multi'?'（複選）':'（單選）'}</div>
+    <div style="font-size:13.5px;line-height:1.6;margin-bottom:10px;white-space:pre-line;">${escAttr(q.questionText)}</div>
+    ${qImg ? `<img class="modal-img" src="${qImg}" style="max-width:220px;margin-bottom:10px;">` : ''}
+    ${letters.map(L=>{
+      const txt = (q.optionsText&&q.optionsText[L]) || '';
+      const img = (q.optionImages&&q.optionImages[L]) ? window.__quizImgCache[q.optionImages[L]] : null;
+      const isOn = picked.includes(L);
+      const inputType = q.type==='multi' ? 'checkbox' : 'radio';
+      return `
+      <label class="check-row ${isOn?'checked':''}" style="cursor:pointer;">
+        <input type="${inputType}" ${q.type==='single'?`name="q_${q.id}"`:''} ${isOn?'checked':''} onchange="selectQuizAnswer('${q.id}','${L}','${q.type}')">
+        <div class="txt">
+          <div class="line">${L}${txt?`. ${escAttr(txt)}`:''}</div>
+          ${img?`<img src="${img}" style="max-width:120px;border-radius:8px;margin-top:6px;display:block;">`:''}
+        </div>
+      </label>`;
+    }).join('')}
+  </div>`;
+}
+function renderQuizResult(){
+  const quiz = S.quiz;
+  const st = findStation(quiz.stationId);
+  const pct = Math.round(quiz.result.score/quiz.result.total*100);
+  const rows = quiz.questions.map((q,i)=>{
+    const d = quiz.result.detail.find(x=>x.qId===q.id);
+    const qImg = q.questionImage ? window.__quizImgCache[q.questionImage] : null;
+    return `
+    <div class="card" style="border-left:4px solid ${d.isCorrect?'var(--primary)':'var(--danger)'};">
+      <div style="font-weight:700;font-size:13px;margin-bottom:6px;">第 ${i+1} 題　${d.isCorrect?'✅ 答對':'❌ 答錯'}</div>
+      <div style="font-size:13px;margin-bottom:8px;white-space:pre-line;">${escAttr(q.questionText)}</div>
+      ${qImg?`<img class="modal-img" src="${qImg}" style="max-width:180px;margin-bottom:8px;">`:''}
+      <div style="font-size:12px;color:var(--ink-soft);margin-bottom:4px;">你的答案：${d.picked.length?d.picked.join('、'):'（未作答）'}　|　正確答案：${(q.correctAnswers||[]).join('、')}</div>
+      ${!d.isCorrect && q.explanation ? renderExplanationBlock(q.explanation) : ''}
+    </div>`;
+  }).join('');
+  return `
+  <div class="view">
+    <div class="back-row"><button class="back-btn" onclick="exitQuiz()">← 回站別</button></div>
+    <h2 class="page-title">${st?st.name:''} 考核結果</h2>
+    <div class="preview-card" style="margin-bottom:16px;">
+      <h4>本次成績</h4>
+      <p class="quiz-score-big">${quiz.result.score} / ${quiz.result.total}（${pct}%）</p>
+    </div>
+    ${rows}
+    <button class="btn btn-primary btn-block" style="margin:10px 0 20px;" onclick="exitQuiz()">完成，回站別頁</button>
+  </div>`;
+}
+function renderQuiz(){
+  const quiz = S.quiz;
+  if(!quiz){ S.view='stations'; return renderStationList(); }
+  if(quiz.submitted) return renderQuizResult();
+  const st = findStation(quiz.stationId);
+  const allAnswered = quiz.questions.every(q=>(quiz.answers[q.id]||[]).length>0);
+  return `
+  <div class="view">
+    <div class="back-row"><button class="back-btn" onclick="exitQuiz()">← 取消考核</button></div>
+    <h2 class="page-title">${st?st.name:''} 站別考核</h2>
+    <p class="page-sub">本次隨機抽出 ${quiz.questions.length} 題，請全部作答後送出。</p>
+    ${quiz.questions.map((q,i)=>renderQuizQuestionCard(q,i)).join('')}
+    <button class="btn btn-primary btn-block" style="margin:14px 0 20px;" onclick="submitQuiz()" ${allAnswered?'':'disabled'}>${allAnswered?'送出考核':'請完成所有題目後送出'}</button>
+  </div>`;
+}
+
+/* =========================================================
    ADMIN — 站別 & 檢核表
    ========================================================= */
 function renderAdmin(){
@@ -2991,10 +3606,11 @@ function renderAdmin(){
     <div class="admin-tabs">
       <button class="${S.adminTab==='stations'?'active':''}" onclick="setAdminTab('stations')">站別與檢核表</button>
       <button class="${S.adminTab==='people'?'active':''}" onclick="setAdminTab('people')">學員與人員</button>
+      <button class="${S.adminTab==='quiz'?'active':''}" onclick="setAdminTab('quiz')">題庫管理</button>
       <button class="${S.adminTab==='history'?'active':''}" onclick="setAdminTab('history')">學習歷程</button>
       <button class="${S.adminTab==='backup'?'active':''}" onclick="setAdminTab('backup')">資料備份</button>
     </div>
-    ${S.adminTab==='stations' ? renderAdminStations() : S.adminTab==='people' ? renderAdminPeople() : S.adminTab==='history' ? renderAdminHistory() : renderAdminBackup()}
+    ${S.adminTab==='stations' ? renderAdminStations() : S.adminTab==='people' ? renderAdminPeople() : S.adminTab==='quiz' ? renderAdminQuiz() : S.adminTab==='history' ? renderAdminHistory() : renderAdminBackup()}
   </div>`;
 }
 async function setAdminTab(t){
@@ -3665,10 +4281,17 @@ function renderAdminHistory(){
     ${picker}
     <div class="subhead" style="margin-top:14px;">進度總覽（所有站別）</div>
     ${summaryHtml}
+    <div class="subhead">考核紀錄</div>
+    ${renderTraineeQuizAttemptsAdmin(name)}
     <div class="subhead">詳細紀錄（依站別分組，各組內時間新到舊）</div>
     <p style="font-size:11px;color:var(--ink-soft);margin:0 0 6px;">提醒：若在站別頁面重置了某位學員的檢核進度，這裡的歷史紀錄仍會保留，不會被清空——這份紀錄是永久的學習軌跡，跟目前的勾選進度是分開存的。</p>
     ${logHtml}
   `;
+}
+function renderTraineeQuizAttemptsAdmin(name){
+  const attempts = traineeQuizAttempts(name);
+  if(!attempts.length) return '<p style="font-size:12.5px;color:var(--ink-soft);">尚無考核紀錄。</p>';
+  return attempts.map(renderQuizAttemptRow).join('');
 }
 
 async function addEmployee(){
@@ -3891,6 +4514,7 @@ function renderApp(){
   else if(S.view==='station-detail') body = renderStationDetail();
   else if(S.view==='admin') body = renderAdmin();
   else if(S.view==='admin-lock') body = renderAdminLock();
+  else if(S.view==='quiz') body = renderQuiz();
 
   app.innerHTML = `
     <div class="shell">
