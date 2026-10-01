@@ -711,13 +711,22 @@ async function processUploadedFile(file){
 }
 function attIcon(type){ return type==='pdf' ? '📄' : (type==='docx'||type==='doc') ? '📝' : '🖼'; }
 
-function renderAdminAttachmentChips(attachments, removeOnclickPrefix){
+function renderAdminAttachmentChips(attachments, removeOnclickPrefix, moveOnclickPrefix){
   if(!attachments || !attachments.length) return '<p style="font-size:11.5px;color:var(--ink-soft);margin:0 0 8px;">尚未上傳任何教材附件。</p>';
-  return attachments.map(a=>`
+  return attachments.map((a,i)=>`
     <div class="admin-item-row">
       <div class="t">${attIcon(a.type)} ${a.name}${a.type==='pdf'?` · ${a.pageCount||0} 頁`:''}</div>
+      ${moveOnclickPrefix ? `
+      <button type="button" class="mini-edit" onclick="${moveOnclickPrefix}'${a.id}',-1)" ${i===0?'disabled style="opacity:.3;"':''}>↑</button>
+      <button type="button" class="mini-edit" onclick="${moveOnclickPrefix}'${a.id}',1)" ${i===attachments.length-1?'disabled style="opacity:.3;"':''}>↓</button>` : ''}
       <button class="mini-x" onclick="${removeOnclickPrefix}'${a.id}')">✕</button>
     </div>`).join('');
+}
+function moveAttInArray(arr, attId, dir){
+  const i = arr.findIndex(a=>a.id===attId), j = i+dir;
+  if(i<0 || j<0 || j>=arr.length) return false;
+  const t = arr[i]; arr[i] = arr[j]; arr[j] = t;
+  return true;
 }
 window.__pdfPages = {};
 function pdfSlideViewer(att, pages){
@@ -3233,7 +3242,7 @@ function editFlowStep(stId, gId, xId){
     <div class="form-group"><label style="display:flex;gap:8px;align-items:center;"><input type="checkbox" id="edit-fs-important" ${x.important?'checked':''} style="width:auto;"> 標記為重點／注意</label></div>
     <div class="form-group"><label>圖片網址（選填，也可用下方上傳檔案）</label><input type="text" id="edit-fs-image" value="${escAttr(x.image||'')}"></div>
     <div class="subhead" style="margin-top:14px;">附件（圖片／PDF／Word）</div>
-    ${renderAdminAttachmentChips(x.attachments, `removeFlowAttachment('${stId}','${gId}','${xId}',`)}
+    ${renderAdminAttachmentChips(x.attachments, `removeFlowAttachment('${stId}','${gId}','${xId}',`, `moveFlowAttachment('${stId}','${gId}','${xId}',`)}
     <input type="file" id="fs-att-input" accept="image/*,.pdf,.doc,.docx" multiple style="width:100%;margin-bottom:6px;">
     <p style="font-size:11px;color:var(--ink-soft);margin:0 0 8px;">單檔請控制在 700KB 以內。</p>
     <button class="btn btn-ghost btn-block" style="margin-bottom:6px;" onclick="uploadFlowAttachments('${stId}','${gId}','${xId}')">上傳選取的檔案</button>
@@ -3426,7 +3435,7 @@ function editPPItem(tabId, itemId){
     <div class="form-group"><label>說明內容</label><textarea id="edit-pp-detail" style="min-height:140px;">${ppEsc(x.detail||'')}</textarea></div>
     <div class="form-group"><label>圖片網址（選填，也可用下方上傳檔案）</label><input type="text" id="edit-pp-image" value="${escAttr(x.image||'')}"></div>
     <div class="subhead" style="margin-top:14px;">附件（圖片／PDF／Word）</div>
-    ${renderAdminAttachmentChips(x.attachments, `removePPAttachment('${tabId}','${itemId}',`)}
+    ${renderAdminAttachmentChips(x.attachments, `removePPAttachment('${tabId}','${itemId}',`, `movePPAttachment('${tabId}','${itemId}',`)}
     <input type="file" id="pp-att-input" accept="image/*,.pdf,.doc,.docx" multiple style="width:100%;margin-bottom:6px;">
     <p style="font-size:11px;color:var(--ink-soft);margin:0 0 8px;">單檔請控制在 700KB 以內。</p>
     <button class="btn btn-ghost btn-block" style="margin-bottom:6px;" onclick="uploadPPAttachments('${tabId}','${itemId}')">上傳選取的檔案</button>
@@ -4387,7 +4396,7 @@ function editTeachingPoint(stId, tpId){
     <div class="form-group"><label>重點內容（每行一項）</label><textarea id="edit-tp-bullets">${tp.bullets.join('\n')}</textarea></div>
     <div class="form-group"><label>圖片網址（選填，也可用下方上傳檔案）</label><input type="text" id="edit-tp-image" value="${escAttr(tp.image)}"></div>
     <div class="subhead" style="margin-top:14px;">教材附件（圖片／PDF／Word）</div>
-    ${renderAdminAttachmentChips(tp.attachments, `removeTpAttachment('${stId}','${tpId}',`)}
+    ${renderAdminAttachmentChips(tp.attachments, `removeTpAttachment('${stId}','${tpId}',`, `moveTpAttachment('${stId}','${tpId}',`)}
     <input type="file" id="tp-att-input" accept="image/*,.pdf,.doc,.docx" multiple style="width:100%;margin-bottom:6px;">
     <p style="font-size:11px;color:var(--ink-soft);margin:0 0 8px;">單檔請控制在 700KB 以內（Firestore 免費方案限制，圖片/PDF/Word 皆同）；Word（.docx）會自動轉換為可預覽內容。</p>
     <button class="btn btn-ghost btn-block" style="margin-bottom:6px;" onclick="uploadTpAttachments('${stId}','${tpId}')">上傳選取的檔案</button>
@@ -4531,7 +4540,7 @@ function renderItemSectionsEditor(sections, stId, catId, itemId){
       <div class="form-group" style="margin-bottom:6px;"><label>標題（紅字顯示）</label><input type="text" class="section-title-input" data-idx="${i}" value="${escAttr(s.title)}"></div>
       <div class="form-group" style="margin-bottom:8px;"><label>說明內容</label><textarea class="section-text-input" data-idx="${i}">${s.text||''}</textarea></div>
       <div class="subhead" style="margin:8px 0 6px;font-size:11px;">此項附件（圖片／PDF／Word）</div>
-      ${renderAdminAttachmentChips(s.attachments, `removeSectionAttachment('${stId}','${catId}','${itemId}',${i},`)}
+      ${renderAdminAttachmentChips(s.attachments, `removeSectionAttachment('${stId}','${catId}','${itemId}',${i},`, `moveSectionAttachment('${stId}','${catId}','${itemId}',${i},`)}
       <input type="file" id="section-att-input-${i}" accept="image/*,.pdf,.doc,.docx" multiple style="width:100%;margin-bottom:6px;">
       <button type="button" class="btn btn-ghost btn-sm btn-block" onclick="uploadSectionAttachments('${stId}','${catId}','${itemId}',${i})">上傳此項附件</button>
       <div id="section-att-status-${i}" style="margin-top:4px;"></div>
@@ -4575,7 +4584,7 @@ function editItem(stId, catId, itemId, sectionsOverride){
       <button type="button" class="btn btn-outline btn-block" style="margin-bottom:14px;" onclick="addItemSection('${stId}','${catId}','${itemId}')">＋ 新增提醒事項</button>
       <div class="form-group"><label>圖片網址（選填，此為整個項目共用，也可用上方各提醒事項自己的附件）</label><input type="text" id="edit-item-image" value="${escAttr(d.image)}"></div>
       <div class="subhead" style="margin-top:6px;">整個項目共用的教材附件（圖片／PDF／Word）</div>
-      <div id="item-attachments-chips">${renderAdminAttachmentChips(d.attachments, `removeItemAttachment('${stId}','${catId}','${itemId}',`)}</div>
+      <div id="item-attachments-chips">${renderAdminAttachmentChips(d.attachments, `removeItemAttachment('${stId}','${catId}','${itemId}',`, `moveItemAttachment('${stId}','${catId}','${itemId}',`)}</div>
       <input type="file" id="item-att-input" accept="image/*,.pdf,.doc,.docx" multiple style="width:100%;margin-bottom:6px;">
       <p style="font-size:11px;color:var(--ink-soft);margin:0 0 8px;">單檔請控制在 700KB 以內（Firestore 免費方案限制，圖片/PDF/Word 皆同）；Word（.docx）會自動轉換為可預覽內容。</p>
       <button type="button" class="btn btn-ghost btn-block" style="margin-bottom:6px;" onclick="uploadItemAttachments('${stId}','${catId}','${itemId}')">上傳選取的檔案</button>
@@ -4633,6 +4642,46 @@ async function uploadSectionAttachments(stId, catId, itemId, sectionIdx){
     : `<p style="color:var(--primary-dk);font-size:11px;">✓ 已上傳 ${newAtts.length} 個檔案</p>`;
   setUploadStatus('section-att-status-'+sectionIdx, summary);
 }
+async function moveTpAttachment(stId, tpId, attId, dir){
+  const st = findStation(stId);
+  const tp = st.teachingPoints.find(t=>t.id===tpId);
+  const f = captureTpModalFields();
+  tp.title = f.title || tp.title; tp.bullets = f.bullets; tp.image = f.image;
+  if(!moveAttInArray(tp.attachments||[], attId, dir)) return;
+  await persist();
+  editTeachingPoint(stId, tpId);
+}
+async function moveFlowAttachment(stId, gId, xId, attId, dir){
+  const {x} = flowFind(stId, gId, xId); if(!x) return;
+  applyFlowModalFields(x);
+  if(!moveAttInArray(x.attachments||[], attId, dir)) return;
+  await persist();
+  editFlowStep(stId, gId, xId);
+}
+async function movePPAttachment(tabId, itemId, attId, dir){
+  const {item:x} = ppFind(tabId, itemId); if(!x) return;
+  applyPPModalFields(x);
+  if(!moveAttInArray(x.attachments||[], attId, dir)) return;
+  await persist();
+  editPPItem(tabId, itemId);
+}
+async function moveItemAttachment(stId, catId, itemId, attId, dir){
+  const st = findStation(stId);
+  const cat = st.categories.find(c=>c.id===catId);
+  const item = cat.items.find(i=>i.id===itemId);
+  const arr = (item.detail && item.detail.attachments) || [];
+  if(!moveAttInArray(arr, attId, dir)) return;
+  await persist();
+  const chipsEl = document.getElementById('item-attachments-chips');
+  if(chipsEl) chipsEl.innerHTML = renderAdminAttachmentChips(arr, `removeItemAttachment('${stId}','${catId}','${itemId}',`, `moveItemAttachment('${stId}','${catId}','${itemId}',`);
+}
+async function moveSectionAttachment(stId, catId, itemId, sectionIdx, attId, dir){
+  const current = readSectionsFromModal();
+  if(!current[sectionIdx]) return;
+  if(!moveAttInArray(current[sectionIdx].attachments||[], attId, dir)) return;
+  refreshItemSectionsUI(stId, catId, itemId, current);
+}
+
 async function removeSectionAttachment(stId, catId, itemId, sectionIdx, attId){
   const current = readSectionsFromModal();
   if(!current[sectionIdx]) return;
@@ -4687,7 +4736,7 @@ async function uploadItemAttachments(stId, catId, itemId){
   item.detail.attachments = mergedAttachments;
   await persist();
   const chipsEl = document.getElementById('item-attachments-chips');
-  if(chipsEl) chipsEl.innerHTML = renderAdminAttachmentChips(mergedAttachments, `removeItemAttachment('${stId}','${catId}','${itemId}',`);
+  if(chipsEl) chipsEl.innerHTML = renderAdminAttachmentChips(mergedAttachments, `removeItemAttachment('${stId}','${catId}','${itemId}',`, `moveItemAttachment('${stId}','${catId}','${itemId}',`);
   if(input) input.value = '';
   const summary = errors.length
     ? `<p style="color:var(--danger);font-size:11.5px;">已上傳 ${newAtts.length} 個檔案；失敗：${errors.join('；')}</p>`
@@ -4705,7 +4754,7 @@ async function removeItemAttachment(stId, catId, itemId, attId){
   await persist();
   deleteAttachmentAndPages(removed);
   const chipsEl = document.getElementById('item-attachments-chips');
-  if(chipsEl) chipsEl.innerHTML = renderAdminAttachmentChips(remaining, `removeItemAttachment('${stId}','${catId}','${itemId}',`);
+  if(chipsEl) chipsEl.innerHTML = renderAdminAttachmentChips(remaining, `removeItemAttachment('${stId}','${catId}','${itemId}',`, `moveItemAttachment('${stId}','${catId}','${itemId}',`);
 }
 
 /* =========================================================
