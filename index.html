@@ -299,6 +299,11 @@ p.page-sub{margin:0 0 16px;color:var(--ink-soft);font-size:13px;}
   flex:1;border:none;background:none;padding:8px 4px;border-radius:100px;font-size:12px;font-weight:700;color:var(--ink-soft);cursor:pointer;
 }
 .admin-tabs button.active{background:var(--primary);color:#fff;}
+.admin-tabs.admin-tabs-3{flex-wrap:wrap;border-radius:22px;}
+.admin-tabs.admin-tabs-3 button{flex:1 1 calc(33.333% - 6px);}
+.pp-subtabs{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:14px;}
+.pp-subtabs button{border:1px solid var(--line);background:var(--paper);padding:7px 14px;border-radius:100px;font-size:12.5px;font-weight:700;color:var(--ink-soft);cursor:pointer;}
+.pp-subtabs button.active{background:var(--primary);border-color:var(--primary);color:#fff;}
 .admin-station-row{
   display:flex;align-items:center;gap:12px;background:var(--paper);border:1px solid var(--line);border-radius:var(--radius-md);
   padding:12px;margin-bottom:10px;
@@ -2401,7 +2406,8 @@ function migrateDB(){
   if(!DB.quizCategoryMap) DB.quizCategoryMap = [];
   if(!DB.quizAttempts) DB.quizAttempts = [];
   if(!DB.flowProgress) DB.flowProgress = {};
-  (DB.stations||[]).forEach(st=>{ if(!st.flow) st.flow = []; if(!st.pp) st.pp = []; });
+  if(!DB.ppTabs) DB.ppTabs = [];
+  (DB.stations||[]).forEach(st=>{ if(!st.flow) st.flow = []; });
   withIncidentCategories(DB);
 }
 const BACKUPS_COLLECTION = 'pharmacy_teaching_app_backups';
@@ -2915,13 +2921,14 @@ function renderStationList(){
   }).join('');
   const tabs = ['weekday','sat','sun'].map(t=>
     `<button class="${S.stationsTab===t?'active':''}" onclick="setStationsTab('${t}')">${DAYTYPE_LABEL[t]}</button>`
-  ).join('');
+  ).join('') + `<button class="${S.stationsTab==='pp'?'active':''}" onclick="setStationsTab('pp')">P&amp;P</button>`;
+  const isPP = S.stationsTab === 'pp';
   return `
   <div class="view">
     <h2 class="page-title">站別教學指引</h2>
-    <p class="page-sub">選擇站別查看務必教學重點與工作檢核表。</p>
+    <p class="page-sub">${isPP ? '查看各項 P&amp;P。' : '選擇站別查看務必教學重點與工作檢核表。'}</p>
     <div class="admin-tabs" style="margin-bottom:14px;">${tabs}</div>
-    ${filtered.length ? rows : '<p style="font-size:12.5px;color:var(--ink-soft);">此分類尚無站別。</p>'}
+    ${isPP ? renderPPPage() : (filtered.length ? rows : '<p style="font-size:12.5px;color:var(--ink-soft);">此分類尚無站別。</p>')}
   </div>`;
 }
 function setStationsTab(t){ S.stationsTab=t; renderApp(); }
@@ -3051,7 +3058,6 @@ function renderStationDetail(){
       <button class="${stTab==='points'?'active':''}" onclick="setStationTab('points')">📖 教學重點</button>
       <button class="${stTab==='check'?'active':''}" onclick="setStationTab('check')">📋 檢核表</button>
       <button class="${stTab==='flow'?'active':''}" onclick="setStationTab('flow')">🕐 工作流程</button>
-      <button class="${stTab==='pp'?'active':''}" onclick="setStationTab('pp')">📑 P&amp;P</button>
     </div>
 
     ${stTab==='points' ? `
@@ -3060,8 +3066,6 @@ function renderStationDetail(){
     ` : ''}
 
     ${stTab==='flow' ? renderStationFlow(st, c, traineeName, canCheck) : ''}
-
-    ${stTab==='pp' ? renderStationPP(st, c) : ''}
 
     ${stTab==='check' ? `
     <div class="block-title" style="margin-top:6px;">📋 工作檢核表</div>
@@ -3282,82 +3286,152 @@ async function removeFlowAttachment(stId, gId, xId, attId){
 }
 
 /* =========================================================
-   P&P：每個站別一份條目清單 st.pp = [{id, title, detail, image, attachments}]
+   P&P：全站共用。DB.ppTabs = [{id, title, items:[{id, title, detail, image, attachments}]}]
+   子分頁（tab）由管理者自行新增
    ========================================================= */
-function renderStationPP(st, c){
-  const list = st.pp || [];
-  if(!list.length) return '<p style="font-size:12.5px;color:var(--ink-soft);">這個站別尚未設定 P&amp;P，請管理者到後台「編輯站別」新增。</p>';
-  return `<div class="block-title" style="margin-top:6px;">📑 P&amp;P</div>` + list.map((x,i)=>{
+function ppEsc(x){ return String(x==null?'':x).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function ppMove(arr, id, dir){
+  const i = arr.findIndex(a=>a.id===id), j = i+dir;
+  if(i<0 || j<0 || j>=arr.length) return;
+  const t = arr[i]; arr[i] = arr[j]; arr[j] = t;
+}
+function ppFind(tabId, itemId){
+  const tab = (DB.ppTabs||[]).find(t=>t.id===tabId);
+  const item = tab && itemId ? tab.items.find(x=>x.id===itemId) : null;
+  return {tab, item};
+}
+function ppCurrentTab(stateKey){
+  const tabs = DB.ppTabs || [];
+  return tabs.find(t=>t.id===S[stateKey]) || tabs[0] || null;
+}
+function setPPTab(id){ S.ppTab = id; renderApp(); }
+
+/* ---- 學員端 ---- */
+function renderPPPage(){
+  const tabs = DB.ppTabs || [];
+  if(!tabs.length) return '<p style="font-size:12.5px;color:var(--ink-soft);">尚未設定 P&amp;P，請管理者到後台新增。</p>';
+  const cur = ppCurrentTab('ppTab');
+  const chips = `<div class="pp-subtabs">${tabs.map(t=>`<button class="${t.id===cur.id?'active':''}" onclick="setPPTab('${t.id}')">${ppEsc(t.title)}</button>`).join('')}</div>`;
+  const items = cur.items.length ? cur.items.map((x,i)=>{
     const hasMedia = !!(x.image || (x.attachments && x.attachments.length));
     return `
-    <div class="tp-card" style="border-left-color:${c.hex};${hasMedia?'cursor:pointer;':''}" ${hasMedia?`onclick="openPPModal('${st.id}','${x.id}')"`:''}>
-      <h5>${i+1}. ${flowEsc(x.title)}</h5>
-      ${x.detail ? `<div style="font-size:12.5px;color:var(--ink-soft);margin-top:4px;white-space:pre-wrap;line-height:1.6;">${flowEsc(x.detail)}</div>` : ''}
-      ${hasMedia ? `<button class="btn btn-ghost btn-sm" style="margin-top:8px;" onclick="event.stopPropagation();openPPModal('${st.id}','${x.id}')">🔎 查看圖片／附件</button>` : ''}
+    <div class="tp-card" style="border-left-color:var(--primary);${hasMedia?'cursor:pointer;':''}" ${hasMedia?`onclick="openPPModal('${cur.id}','${x.id}')"`:''}>
+      <h5>${i+1}. ${ppEsc(x.title)}</h5>
+      ${x.detail ? `<div style="font-size:12.5px;color:var(--ink-soft);margin-top:4px;white-space:pre-wrap;line-height:1.6;">${ppEsc(x.detail)}</div>` : ''}
+      ${hasMedia ? `<button class="btn btn-ghost btn-sm" style="margin-top:8px;" onclick="event.stopPropagation();openPPModal('${cur.id}','${x.id}')">🔎 查看圖片／附件</button>` : ''}
     </div>`;
-  }).join('');
+  }).join('') : '<p style="font-size:12.5px;color:var(--ink-soft);">這個分頁尚無內容。</p>';
+  return chips + items;
 }
-function ppFind(stId, xId){
-  const st = findStation(stId);
-  const x = st && xId ? (st.pp||[]).find(p=>p.id===xId) : null;
-  return {st, x};
-}
-async function openPPModal(stId, xId){
-  const {x} = ppFind(stId, xId); if(!x) return;
-  openModal(`<div class="modal-top"><h4>${flowEsc(x.title)}</h4><button class="modal-close" onclick="closeModal()">✕</button></div><p style="font-size:12px;color:var(--ink-soft);text-align:center;padding:16px 0;">載入中…</p>`);
+async function openPPModal(tabId, itemId){
+  const {item:x} = ppFind(tabId, itemId); if(!x) return;
+  openModal(`<div class="modal-top"><h4>${ppEsc(x.title)}</h4><button class="modal-close" onclick="closeModal()">✕</button></div><p style="font-size:12px;color:var(--ink-soft);text-align:center;padding:16px 0;">載入中…</p>`);
   const attHtml = await renderViewerAttachmentsAsync(x.attachments);
   openModal(`
-    <div class="modal-top"><h4>${flowEsc(x.title)}</h4><button class="modal-close" onclick="closeModal()">✕</button></div>
+    <div class="modal-top"><h4>${ppEsc(x.title)}</h4><button class="modal-close" onclick="closeModal()">✕</button></div>
     ${x.image ? `<img class="modal-img" src="${escAttr(x.image)}" alt="${escAttr(x.title)}">` : ''}
     ${attHtml}
-    ${x.detail ? `<p style="font-size:13px;white-space:pre-wrap;line-height:1.65;">${flowEsc(x.detail)}</p>` : ''}
+    ${x.detail ? `<p style="font-size:13px;white-space:pre-wrap;line-height:1.65;">${ppEsc(x.detail)}</p>` : ''}
     <button class="btn btn-primary btn-block" onclick="closeModal()">關閉</button>
   `);
 }
-function renderPPEditor(st){
-  const list = st.pp || [];
-  return list.map((x,i)=>`
-    <div class="admin-item-row">
-      <div class="t">${flowEsc(x.title)} ${(x.image||(x.attachments&&x.attachments.length))?'<span class="pill-tag tag-sky">有圖／附件</span>':''}</div>
-      <button class="mini-edit" onclick="movePPItem('${st.id}','${x.id}',-1)" ${i===0?'disabled style="opacity:.3;"':''}>↑</button>
-      <button class="mini-edit" onclick="movePPItem('${st.id}','${x.id}',1)" ${i===list.length-1?'disabled style="opacity:.3;"':''}>↓</button>
-      <button class="mini-edit" onclick="editPPItem('${st.id}','${x.id}')">編輯</button>
-      <button class="mini-x" onclick="deletePPItem('${st.id}','${x.id}')">✕</button>
-    </div>`).join('') + `<button class="btn btn-outline btn-block" onclick="addPPItem('${st.id}')">＋ 新增條目</button>`;
+
+/* ---- 後台 ---- */
+function setAdminPPTab(id){ S.adminPPTab = id; renderApp(); }
+function renderAdminPP(){
+  const tabs = DB.ppTabs || [];
+  const cur = ppCurrentTab('adminPPTab');
+  const chips = tabs.length ? `<div class="pp-subtabs">${tabs.map(t=>`<button class="${cur && t.id===cur.id?'active':''}" onclick="setAdminPPTab('${t.id}')">${ppEsc(t.title)}</button>`).join('')}</div>` : '';
+  let body = '';
+  if(cur){
+    const ti = tabs.findIndex(t=>t.id===cur.id);
+    body = `
+    <div class="card" style="padding:12px;margin-bottom:10px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;gap:6px;flex-wrap:wrap;">
+        <b style="font-size:13px;">分頁：${ppEsc(cur.title)}</b>
+        <div>
+          <button class="mini-edit" onclick="movePPTab('${cur.id}',-1)" ${ti===0?'disabled style="opacity:.3;"':''}>←</button>
+          <button class="mini-edit" onclick="movePPTab('${cur.id}',1)" ${ti===tabs.length-1?'disabled style="opacity:.3;"':''}>→</button>
+          <button class="mini-edit" onclick="renamePPTab('${cur.id}')">重新命名</button>
+          <button class="mini-x" onclick="deletePPTab('${cur.id}')">✕</button>
+        </div>
+      </div>
+      ${cur.items.map((x,i)=>`
+        <div class="admin-item-row">
+          <div class="t">${ppEsc(x.title)} ${(x.image||(x.attachments&&x.attachments.length))?'<span class="pill-tag tag-sky">有圖／附件</span>':''}</div>
+          <button class="mini-edit" onclick="movePPItem('${cur.id}','${x.id}',-1)" ${i===0?'disabled style="opacity:.3;"':''}>↑</button>
+          <button class="mini-edit" onclick="movePPItem('${cur.id}','${x.id}',1)" ${i===cur.items.length-1?'disabled style="opacity:.3;"':''}>↓</button>
+          <button class="mini-edit" onclick="editPPItem('${cur.id}','${x.id}')">編輯</button>
+          <button class="mini-x" onclick="deletePPItem('${cur.id}','${x.id}')">✕</button>
+        </div>`).join('')}
+      <button class="btn btn-ghost btn-sm" style="margin-top:4px;" onclick="addPPItem('${cur.id}')">＋ 新增條目</button>
+    </div>`;
+  }
+  return `
+    ${tabs.length ? '' : '<p style="font-size:12.5px;color:var(--ink-soft);">還沒有任何 P&amp;P 分頁，請先新增。</p>'}
+    ${chips}
+    ${body}
+    <button class="btn btn-outline btn-block" onclick="addPPTab()">＋ 新增子分頁</button>`;
 }
-async function addPPItem(stId){
-  const {st} = ppFind(stId); if(!st) return;
-  if(!st.pp) st.pp = [];
+async function addPPTab(){
+  const name = prompt('分頁名稱', '');
+  if(name === null) return;
+  if(!DB.ppTabs) DB.ppTabs = [];
+  const t = {id:uid('ppt'), title:name.trim() || '新分頁', items:[]};
+  DB.ppTabs.push(t);
+  S.adminPPTab = t.id;
+  await persist(); renderApp();
+}
+async function renamePPTab(tabId){
+  const {tab} = ppFind(tabId); if(!tab) return;
+  const name = prompt('分頁名稱', tab.title);
+  if(name === null || !name.trim()) return;
+  tab.title = name.trim(); await persist(); renderApp();
+}
+async function deletePPTab(tabId){
+  const {tab} = ppFind(tabId); if(!tab) return;
+  if(!confirm(`確定要刪除分頁「${tab.title}」與底下的 ${tab.items.length} 個條目嗎？`)) return;
+  DB.ppTabs = DB.ppTabs.filter(t=>t.id!==tabId);
+  if(S.adminPPTab === tabId) S.adminPPTab = null;
+  if(S.ppTab === tabId) S.ppTab = null;
+  await persist(); renderApp();
+  tab.items.forEach(x=>(x.attachments||[]).forEach(a=>deleteAttachmentAndPages(a)));
+}
+async function movePPTab(tabId, dir){
+  ppMove(DB.ppTabs, tabId, dir); await persist(); renderApp();
+}
+async function addPPItem(tabId){
+  const {tab} = ppFind(tabId); if(!tab) return;
   const x = {id:uid('pp'), title:'新條目', detail:'', image:'', attachments:[]};
-  st.pp.push(x);
+  tab.items.push(x);
   await persist(); renderApp();
-  editPPItem(stId, x.id);
+  editPPItem(tabId, x.id);
 }
-async function deletePPItem(stId, xId){
-  const {st, x} = ppFind(stId, xId); if(!x) return;
-  if(!confirm(`確定要刪除條目「${x.title}」嗎？`)) return;
-  st.pp = st.pp.filter(p=>p.id!==xId);
+async function deletePPItem(tabId, itemId){
+  const {tab, item} = ppFind(tabId, itemId); if(!item) return;
+  if(!confirm(`確定要刪除條目「${item.title}」嗎？`)) return;
+  tab.items = tab.items.filter(x=>x.id!==itemId);
   await persist(); renderApp();
-  (x.attachments||[]).forEach(a=>deleteAttachmentAndPages(a));
+  (item.attachments||[]).forEach(a=>deleteAttachmentAndPages(a));
 }
-async function movePPItem(stId, xId, dir){
-  const {st} = ppFind(stId); if(!st) return;
-  flowMove(st.pp, xId, dir); await persist(); renderApp();
+async function movePPItem(tabId, itemId, dir){
+  const {tab} = ppFind(tabId); if(!tab) return;
+  ppMove(tab.items, itemId, dir); await persist(); renderApp();
 }
-function editPPItem(stId, xId){
-  const {x} = ppFind(stId, xId); if(!x) return;
+function editPPItem(tabId, itemId){
+  const {item:x} = ppFind(tabId, itemId); if(!x) return;
   openModal(`
     <div class="modal-top"><h4>編輯條目</h4><button class="modal-close" onclick="closeModal()">✕</button></div>
     <div class="form-group"><label>標題</label><input type="text" id="edit-pp-title" value="${escAttr(x.title)}"></div>
-    <div class="form-group"><label>說明內容</label><textarea id="edit-pp-detail" style="min-height:140px;">${flowEsc(x.detail||'')}</textarea></div>
+    <div class="form-group"><label>說明內容</label><textarea id="edit-pp-detail" style="min-height:140px;">${ppEsc(x.detail||'')}</textarea></div>
     <div class="form-group"><label>圖片網址（選填，也可用下方上傳檔案）</label><input type="text" id="edit-pp-image" value="${escAttr(x.image||'')}"></div>
     <div class="subhead" style="margin-top:14px;">附件（圖片／PDF／Word）</div>
-    ${renderAdminAttachmentChips(x.attachments, `removePPAttachment('${stId}','${xId}',`)}
+    ${renderAdminAttachmentChips(x.attachments, `removePPAttachment('${tabId}','${itemId}',`)}
     <input type="file" id="pp-att-input" accept="image/*,.pdf,.doc,.docx" multiple style="width:100%;margin-bottom:6px;">
     <p style="font-size:11px;color:var(--ink-soft);margin:0 0 8px;">單檔請控制在 700KB 以內。</p>
-    <button class="btn btn-ghost btn-block" style="margin-bottom:6px;" onclick="uploadPPAttachments('${stId}','${xId}')">上傳選取的檔案</button>
+    <button class="btn btn-ghost btn-block" style="margin-bottom:6px;" onclick="uploadPPAttachments('${tabId}','${itemId}')">上傳選取的檔案</button>
     <div id="pp-att-status" style="margin-bottom:10px;"></div>
-    <button class="btn btn-primary btn-block" onclick="savePPItem('${stId}','${xId}')">儲存</button>
+    <button class="btn btn-primary btn-block" onclick="savePPItem('${tabId}','${itemId}')">儲存</button>
   `);
 }
 function applyPPModalFields(x){
@@ -3368,13 +3442,13 @@ function applyPPModalFields(x){
   x.detail = document.getElementById('edit-pp-detail').value;
   x.image = document.getElementById('edit-pp-image').value.trim();
 }
-async function savePPItem(stId, xId){
-  const {x} = ppFind(stId, xId); if(!x) return;
+async function savePPItem(tabId, itemId){
+  const {item:x} = ppFind(tabId, itemId); if(!x) return;
   applyPPModalFields(x);
   await persist(); closeModal(); renderApp(); showToast('已儲存條目');
 }
-async function uploadPPAttachments(stId, xId){
-  const {x} = ppFind(stId, xId); if(!x) return;
+async function uploadPPAttachments(tabId, itemId){
+  const {item:x} = ppFind(tabId, itemId); if(!x) return;
   const input = document.getElementById('pp-att-input');
   const files = Array.from((input && input.files) || []);
   if(!files.length){ setUploadStatus('pp-att-status', '<p style="color:var(--danger);font-size:11.5px;">請先選擇檔案</p>'); return; }
@@ -3388,19 +3462,19 @@ async function uploadPPAttachments(stId, xId){
   }
   x.attachments = (x.attachments||[]).concat(newAtts);
   await persist();
-  editPPItem(stId, xId);
+  editPPItem(tabId, itemId);
   setUploadStatus('pp-att-status', errors.length
     ? `<p style="color:var(--danger);font-size:11.5px;">已上傳 ${newAtts.length} 個檔案；失敗：${errors.join('；')}</p>`
     : `<p style="color:var(--primary-dk);font-size:11.5px;">✓ 已上傳 ${newAtts.length} 個檔案</p>`);
 }
-async function removePPAttachment(stId, xId, attId){
-  const {x} = ppFind(stId, xId); if(!x) return;
+async function removePPAttachment(tabId, itemId, attId){
+  const {item:x} = ppFind(tabId, itemId); if(!x) return;
   const removed = (x.attachments||[]).find(a=>a.id===attId);
   applyPPModalFields(x);
   x.attachments = (x.attachments||[]).filter(a=>a.id!==attId);
   await persist();
   if(removed) deleteAttachmentAndPages(removed);
-  editPPItem(stId, xId);
+  editPPItem(tabId, itemId);
 }
 
 async function resetStationProgress(stationId, traineeName){
@@ -4141,14 +4215,15 @@ function renderAdmin(){
   <div class="view">
     <h2 class="page-title">後台管理</h2>
     <p class="page-sub">維護各站別、工作檢核表與教學內容。</p>
-    <div class="admin-tabs">
+    <div class="admin-tabs admin-tabs-3">
       <button class="${S.adminTab==='stations'?'active':''}" onclick="setAdminTab('stations')">站別與檢核表</button>
       <button class="${S.adminTab==='people'?'active':''}" onclick="setAdminTab('people')">學員與人員</button>
       <button class="${S.adminTab==='quiz'?'active':''}" onclick="setAdminTab('quiz')">題庫管理</button>
+      <button class="${S.adminTab==='pp'?'active':''}" onclick="setAdminTab('pp')">P&amp;P</button>
       <button class="${S.adminTab==='history'?'active':''}" onclick="setAdminTab('history')">學習歷程</button>
       <button class="${S.adminTab==='backup'?'active':''}" onclick="setAdminTab('backup')">資料備份</button>
     </div>
-    ${S.adminTab==='stations' ? renderAdminStations() : S.adminTab==='people' ? renderAdminPeople() : S.adminTab==='quiz' ? renderAdminQuiz() : S.adminTab==='history' ? renderAdminHistory() : renderAdminBackup()}
+    ${S.adminTab==='stations' ? renderAdminStations() : S.adminTab==='people' ? renderAdminPeople() : S.adminTab==='quiz' ? renderAdminQuiz() : S.adminTab==='pp' ? renderAdminPP() : S.adminTab==='history' ? renderAdminHistory() : renderAdminBackup()}
   </div>`;
 }
 async function setAdminTab(t){
@@ -4283,9 +4358,6 @@ function renderStationEditor(stationId){
 
     <div class="subhead">工作流程（依時段分組）</div>
     ${renderFlowEditor(st)}
-
-    <div class="subhead">P&amp;P</div>
-    ${renderPPEditor(st)}
 
     <div class="subhead">異常事件</div>
     ${incidentHtml}
