@@ -3161,7 +3161,7 @@ function renderFlowEditor(st){
         </div>`).join('')}
       <button class="btn btn-ghost btn-sm" style="margin-top:4px;" onclick="addFlowStep('${st.id}','${g.id}')">＋ 新增步驟</button>
     </div>`).join('');
-  return html + `<button class="btn btn-outline btn-block" onclick="addFlowGroup('${st.id}')">＋ 新增時段（例如：早班開店、中午、下班前）</button>`;
+  return html + `<button class="btn btn-outline btn-block" onclick="addFlowGroup('${st.id}')">＋ 新增時段</button>`;
 }
 function flowFind(stId, gId, xId){
   const st = findStation(stId);
@@ -3176,7 +3176,7 @@ function flowMove(arr, id, dir){
 }
 async function addFlowGroup(stId){
   const st = findStation(stId); if(!st.flow) st.flow = [];
-  const name = prompt('時段名稱（例如：08:00–09:00 開店準備）', '');
+  const name = prompt('時段名稱', '');
   if(name === null) return;
   st.flow.push({id:uid('fg'), title:name.trim() || '新時段', steps:[]});
   await persist(); renderApp();
@@ -3220,7 +3220,7 @@ async function moveFlowStep(stId, gId, xId, dir){
 function editFlowStep(stId, gId, xId){
   const {x} = flowFind(stId, gId, xId); if(!x) return;
   openModal(`
-    <div class="modal-top"><h4>編輯流水步驟</h4><button class="modal-close" onclick="closeModal()">✕</button></div>
+    <div class="modal-top"><h4>編輯步驟</h4><button class="modal-close" onclick="closeModal()">✕</button></div>
     <div class="form-group"><label>步驟標題</label><input type="text" id="edit-fs-text" value="${escAttr(x.text)}"></div>
     <div class="form-group"><label>詳細說明</label><textarea id="edit-fs-detail" style="min-height:120px;">${flowEsc(x.detail||'')}</textarea></div>
     <div class="form-group"><label style="display:flex;gap:8px;align-items:center;"><input type="checkbox" id="edit-fs-important" ${x.important?'checked':''} style="width:auto;"> 標記為重點／注意</label></div>
@@ -3246,7 +3246,7 @@ function applyFlowModalFields(x){
 async function saveFlowStep(stId, gId, xId){
   const {x} = flowFind(stId, gId, xId); if(!x) return;
   applyFlowModalFields(x);
-  await persist(); closeModal(); renderApp(); showToast('已儲存流水步驟');
+  await persist(); closeModal(); renderApp(); showToast('已儲存步驟');
 }
 async function uploadFlowAttachments(stId, gId, xId){
   const {x} = flowFind(stId, gId, xId); if(!x) return;
