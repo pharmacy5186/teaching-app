@@ -2401,7 +2401,7 @@ function migrateDB(){
   if(!DB.quizCategoryMap) DB.quizCategoryMap = [];
   if(!DB.quizAttempts) DB.quizAttempts = [];
   if(!DB.flowProgress) DB.flowProgress = {};
-  (DB.stations||[]).forEach(st=>{ if(!st.flow) st.flow = []; });
+  (DB.stations||[]).forEach(st=>{ if(!st.flow) st.flow = []; if(!st.pp) st.pp = []; });
   withIncidentCategories(DB);
 }
 const BACKUPS_COLLECTION = 'pharmacy_teaching_app_backups';
@@ -3051,6 +3051,7 @@ function renderStationDetail(){
       <button class="${stTab==='points'?'active':''}" onclick="setStationTab('points')">📖 教學重點</button>
       <button class="${stTab==='check'?'active':''}" onclick="setStationTab('check')">📋 檢核表</button>
       <button class="${stTab==='flow'?'active':''}" onclick="setStationTab('flow')">🕐 工作流程</button>
+      <button class="${stTab==='pp'?'active':''}" onclick="setStationTab('pp')">📑 P&amp;P</button>
     </div>
 
     ${stTab==='points' ? `
@@ -3059,6 +3060,8 @@ function renderStationDetail(){
     ` : ''}
 
     ${stTab==='flow' ? renderStationFlow(st, c, traineeName, canCheck) : ''}
+
+    ${stTab==='pp' ? renderStationPP(st, c) : ''}
 
     ${stTab==='check' ? `
     <div class="block-title" style="margin-top:6px;">📋 工作檢核表</div>
@@ -3276,6 +3279,128 @@ async function removeFlowAttachment(stId, gId, xId, attId){
   await persist();
   if(removed) deleteAttachmentAndPages(removed);
   editFlowStep(stId, gId, xId);
+}
+
+/* =========================================================
+   P&P：每個站別一份條目清單 st.pp = [{id, title, detail, image, attachments}]
+   ========================================================= */
+function renderStationPP(st, c){
+  const list = st.pp || [];
+  if(!list.length) return '<p style="font-size:12.5px;color:var(--ink-soft);">這個站別尚未設定 P&amp;P，請管理者到後台「編輯站別」新增。</p>';
+  return `<div class="block-title" style="margin-top:6px;">📑 P&amp;P</div>` + list.map((x,i)=>{
+    const hasMedia = !!(x.image || (x.attachments && x.attachments.length));
+    return `
+    <div class="tp-card" style="border-left-color:${c.hex};${hasMedia?'cursor:pointer;':''}" ${hasMedia?`onclick="openPPModal('${st.id}','${x.id}')"`:''}>
+      <h5>${i+1}. ${flowEsc(x.title)}</h5>
+      ${x.detail ? `<div style="font-size:12.5px;color:var(--ink-soft);margin-top:4px;white-space:pre-wrap;line-height:1.6;">${flowEsc(x.detail)}</div>` : ''}
+      ${hasMedia ? `<button class="btn btn-ghost btn-sm" style="margin-top:8px;" onclick="event.stopPropagation();openPPModal('${st.id}','${x.id}')">🔎 查看圖片／附件</button>` : ''}
+    </div>`;
+  }).join('');
+}
+function ppFind(stId, xId){
+  const st = findStation(stId);
+  const x = st && xId ? (st.pp||[]).find(p=>p.id===xId) : null;
+  return {st, x};
+}
+async function openPPModal(stId, xId){
+  const {x} = ppFind(stId, xId); if(!x) return;
+  openModal(`<div class="modal-top"><h4>${flowEsc(x.title)}</h4><button class="modal-close" onclick="closeModal()">✕</button></div><p style="font-size:12px;color:var(--ink-soft);text-align:center;padding:16px 0;">載入中…</p>`);
+  const attHtml = await renderViewerAttachmentsAsync(x.attachments);
+  openModal(`
+    <div class="modal-top"><h4>${flowEsc(x.title)}</h4><button class="modal-close" onclick="closeModal()">✕</button></div>
+    ${x.image ? `<img class="modal-img" src="${escAttr(x.image)}" alt="${escAttr(x.title)}">` : ''}
+    ${attHtml}
+    ${x.detail ? `<p style="font-size:13px;white-space:pre-wrap;line-height:1.65;">${flowEsc(x.detail)}</p>` : ''}
+    <button class="btn btn-primary btn-block" onclick="closeModal()">關閉</button>
+  `);
+}
+function renderPPEditor(st){
+  const list = st.pp || [];
+  return list.map((x,i)=>`
+    <div class="admin-item-row">
+      <div class="t">${flowEsc(x.title)} ${(x.image||(x.attachments&&x.attachments.length))?'<span class="pill-tag tag-sky">有圖／附件</span>':''}</div>
+      <button class="mini-edit" onclick="movePPItem('${st.id}','${x.id}',-1)" ${i===0?'disabled style="opacity:.3;"':''}>↑</button>
+      <button class="mini-edit" onclick="movePPItem('${st.id}','${x.id}',1)" ${i===list.length-1?'disabled style="opacity:.3;"':''}>↓</button>
+      <button class="mini-edit" onclick="editPPItem('${st.id}','${x.id}')">編輯</button>
+      <button class="mini-x" onclick="deletePPItem('${st.id}','${x.id}')">✕</button>
+    </div>`).join('') + `<button class="btn btn-outline btn-block" onclick="addPPItem('${st.id}')">＋ 新增條目</button>`;
+}
+async function addPPItem(stId){
+  const {st} = ppFind(stId); if(!st) return;
+  if(!st.pp) st.pp = [];
+  const x = {id:uid('pp'), title:'新條目', detail:'', image:'', attachments:[]};
+  st.pp.push(x);
+  await persist(); renderApp();
+  editPPItem(stId, x.id);
+}
+async function deletePPItem(stId, xId){
+  const {st, x} = ppFind(stId, xId); if(!x) return;
+  if(!confirm(`確定要刪除條目「${x.title}」嗎？`)) return;
+  st.pp = st.pp.filter(p=>p.id!==xId);
+  await persist(); renderApp();
+  (x.attachments||[]).forEach(a=>deleteAttachmentAndPages(a));
+}
+async function movePPItem(stId, xId, dir){
+  const {st} = ppFind(stId); if(!st) return;
+  flowMove(st.pp, xId, dir); await persist(); renderApp();
+}
+function editPPItem(stId, xId){
+  const {x} = ppFind(stId, xId); if(!x) return;
+  openModal(`
+    <div class="modal-top"><h4>編輯條目</h4><button class="modal-close" onclick="closeModal()">✕</button></div>
+    <div class="form-group"><label>標題</label><input type="text" id="edit-pp-title" value="${escAttr(x.title)}"></div>
+    <div class="form-group"><label>說明內容</label><textarea id="edit-pp-detail" style="min-height:140px;">${flowEsc(x.detail||'')}</textarea></div>
+    <div class="form-group"><label>圖片網址（選填，也可用下方上傳檔案）</label><input type="text" id="edit-pp-image" value="${escAttr(x.image||'')}"></div>
+    <div class="subhead" style="margin-top:14px;">附件（圖片／PDF／Word）</div>
+    ${renderAdminAttachmentChips(x.attachments, `removePPAttachment('${stId}','${xId}',`)}
+    <input type="file" id="pp-att-input" accept="image/*,.pdf,.doc,.docx" multiple style="width:100%;margin-bottom:6px;">
+    <p style="font-size:11px;color:var(--ink-soft);margin:0 0 8px;">單檔請控制在 700KB 以內。</p>
+    <button class="btn btn-ghost btn-block" style="margin-bottom:6px;" onclick="uploadPPAttachments('${stId}','${xId}')">上傳選取的檔案</button>
+    <div id="pp-att-status" style="margin-bottom:10px;"></div>
+    <button class="btn btn-primary btn-block" onclick="savePPItem('${stId}','${xId}')">儲存</button>
+  `);
+}
+function applyPPModalFields(x){
+  forceCommitActiveInput();
+  const t = document.getElementById('edit-pp-title');
+  if(!t) return;
+  x.title = t.value.trim() || x.title;
+  x.detail = document.getElementById('edit-pp-detail').value;
+  x.image = document.getElementById('edit-pp-image').value.trim();
+}
+async function savePPItem(stId, xId){
+  const {x} = ppFind(stId, xId); if(!x) return;
+  applyPPModalFields(x);
+  await persist(); closeModal(); renderApp(); showToast('已儲存條目');
+}
+async function uploadPPAttachments(stId, xId){
+  const {x} = ppFind(stId, xId); if(!x) return;
+  const input = document.getElementById('pp-att-input');
+  const files = Array.from((input && input.files) || []);
+  if(!files.length){ setUploadStatus('pp-att-status', '<p style="color:var(--danger);font-size:11.5px;">請先選擇檔案</p>'); return; }
+  setUploadStatus('pp-att-status', '<p style="color:var(--ink-soft);font-size:11.5px;">上傳中，請稍候…</p>');
+  applyPPModalFields(x);
+  const newAtts = [], errors = [];
+  for(const file of files){
+    if(file.size > MAX_ATTACHMENT_BYTES){ errors.push(`${file.name} 超過 ${humanFileSize(MAX_ATTACHMENT_BYTES)}`); continue; }
+    try{ newAtts.push(await processUploadedFile(file)); }
+    catch(e){ console.error(e); errors.push(`${file.name} 上傳失敗：${e.message||e}`); }
+  }
+  x.attachments = (x.attachments||[]).concat(newAtts);
+  await persist();
+  editPPItem(stId, xId);
+  setUploadStatus('pp-att-status', errors.length
+    ? `<p style="color:var(--danger);font-size:11.5px;">已上傳 ${newAtts.length} 個檔案；失敗：${errors.join('；')}</p>`
+    : `<p style="color:var(--primary-dk);font-size:11.5px;">✓ 已上傳 ${newAtts.length} 個檔案</p>`);
+}
+async function removePPAttachment(stId, xId, attId){
+  const {x} = ppFind(stId, xId); if(!x) return;
+  const removed = (x.attachments||[]).find(a=>a.id===attId);
+  applyPPModalFields(x);
+  x.attachments = (x.attachments||[]).filter(a=>a.id!==attId);
+  await persist();
+  if(removed) deleteAttachmentAndPages(removed);
+  editPPItem(stId, xId);
 }
 
 async function resetStationProgress(stationId, traineeName){
@@ -4158,6 +4283,9 @@ function renderStationEditor(stationId){
 
     <div class="subhead">工作流程（依時段分組）</div>
     ${renderFlowEditor(st)}
+
+    <div class="subhead">P&amp;P</div>
+    ${renderPPEditor(st)}
 
     <div class="subhead">異常事件</div>
     ${incidentHtml}
