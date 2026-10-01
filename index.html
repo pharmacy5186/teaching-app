@@ -2400,6 +2400,8 @@ function migrateDB(){
   if(!DB.quizBank) DB.quizBank = [];
   if(!DB.quizCategoryMap) DB.quizCategoryMap = [];
   if(!DB.quizAttempts) DB.quizAttempts = [];
+  if(!DB.flowProgress) DB.flowProgress = {};
+  (DB.stations||[]).forEach(st=>{ if(!st.flow) st.flow = []; });
   withIncidentCategories(DB);
 }
 const BACKUPS_COLLECTION = 'pharmacy_teaching_app_backups';
@@ -2949,6 +2951,7 @@ function renderStationDetail(){
   if(!st){ S.view='stations'; return renderStationList(); }
   const c = STATION_COLORS.find(c=>c.id===st.color) || STATION_COLORS[0];
   const traineeName = S.progressTraineeName;
+  const stTab = S.stationTab || 'points';
   const checked = getChecked(st.id, traineeName);
   const pct = percentDone(st, traineeName);
   const viewDate = S.stationViewDate || todayStr();
@@ -3044,17 +3047,235 @@ function renderStationDetail(){
 
     <button class="btn btn-amber btn-block" style="margin-bottom:18px;" onclick="startStationQuiz('${st.id}')">📝 站別考核（隨機抽 5 題）</button>
 
+    <div class="admin-tabs" style="margin-bottom:14px;">
+      <button class="${stTab==='points'?'active':''}" onclick="setStationTab('points')">📖 教學重點</button>
+      <button class="${stTab==='check'?'active':''}" onclick="setStationTab('check')">📋 檢核表</button>
+      <button class="${stTab==='flow'?'active':''}" onclick="setStationTab('flow')">🕐 工作流程</button>
+    </div>
+
+    ${stTab==='points' ? `
     <div class="block-title">📖 務必教學重點</div>
     ${tpCards || '<p style="font-size:12.5px;color:var(--ink-soft);">尚未設定教學重點，請至後台新增。</p>'}
+    ` : ''}
 
-    <div class="block-title" style="margin-top:22px;">📋 工作檢核表</div>
+    ${stTab==='flow' ? renderStationFlow(st, c, traineeName, canCheck) : ''}
+
+    ${stTab==='check' ? `
+    <div class="block-title" style="margin-top:6px;">📋 工作檢核表</div>
     <div class="hint-banner">💡 請老師確認學生了解後再勾選；項目文字旁有「i」標記者，點擊文字可查看教學小視窗。勾選進度會持續累積，不會每天重置，可以分好幾天完成。</div>
     ${catBlocks || '<p style="font-size:12.5px;color:var(--ink-soft);">尚未設定檢核表，請至後台新增。</p>'}
 
     ${incidentBlock}
 
     ${canCheck ? `<div class="reset-row"><button onclick="resetStationProgress('${st.id}','${traineeName}')">重新開始「${traineeName}」在本站的檢核進度</button></div>` : ''}
+    ` : ''}
   </div>`;
+}
+
+/* =========================================================
+   工作流程（依時段分組的詳細步驟）
+   st.flow = [{id, title, steps:[{id, text, detail, important, image, attachments}]}]
+   勾選紀錄獨立存在 DB.flowProgress，不影響原本檢核表的完成度、鎖定與學習歷程
+   ========================================================= */
+function flowEsc(x){ return String(x==null?'':x).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function setStationTab(t){ S.stationTab = t; renderApp(); }
+function getFlowChecked(stationId, traineeName){ return (DB.flowProgress && DB.flowProgress[progressKey(stationId, traineeName)]) || []; }
+function flowTotalSteps(st){ return (st.flow||[]).reduce((a,g)=>a+g.steps.length,0); }
+function renderStationFlow(st, c, traineeName, canCheck){
+  const groups = st.flow || [];
+  if(!groups.length) return '<p style="font-size:12.5px;color:var(--ink-soft);">這個站別尚未設定工作流程，請管理者到後台「編輯站別」新增。</p>';
+  const arr = traineeName ? getFlowChecked(st.id, traineeName) : [];
+  const total = flowTotalSteps(st);
+  const done = groups.reduce((a,g)=>a+g.steps.filter(x=>arr.includes(x.id)).length,0);
+  const summary = traineeName && total ? `<div class="hint-banner">🕐 流程熟悉度：${done}/${total}（僅供自我確認，不影響檢核表完成度）</div>` : '';
+  const hint = (traineeName && !canCheck) ? '<p style="font-size:11.5px;color:var(--ink-soft);margin:0 0 10px;">🔒 只有學員本人登入後才能勾選。</p>' : '';
+  const blocks = groups.map((g,gi)=>`
+    <div class="cat-block">
+      <div class="cat-title"><span class="cat-num">${gi+1}</span>${flowEsc(g.title)}</div>
+      ${g.steps.length ? g.steps.map((x,xi)=>{
+        const isChecked = arr.includes(x.id);
+        const hasMedia = !!(x.image || (x.attachments && x.attachments.length));
+        const attrs = canCheck ? `onclick="event.stopPropagation();toggleFlowStep('${st.id}','${x.id}','${traineeName}')"` : `disabled title="只有學員本人可以勾選"`;
+        return `
+        <div class="check-row ${isChecked?'checked':''} ${x.important?'important':''}">
+          <input type="checkbox" ${isChecked?'checked':''} ${attrs}>
+          <div class="txt" ${hasMedia?`onclick="openFlowStepModal('${st.id}','${g.id}','${x.id}')"`:''} style="${hasMedia?'':'cursor:default;'}">
+            <div class="line"><b>${gi+1}.${xi+1}</b> ${flowEsc(x.text)}${hasMedia?'<span class="info-dot">i</span>':''}</div>
+            ${x.important?'<div class="note">* 重點注意</div>':''}
+            ${x.detail?`<div style="font-size:12px;color:var(--ink-soft);margin-top:4px;white-space:pre-wrap;line-height:1.55;">${flowEsc(x.detail)}</div>`:''}
+          </div>
+        </div>`;
+      }).join('') : '<p style="font-size:12px;color:var(--ink-soft);margin:4px 0;">此時段尚無步驟。</p>'}
+    </div>`).join('');
+  return `<div class="block-title" style="margin-top:6px;">🕐 工作流程</div>${summary}${hint}${blocks}`;
+}
+async function toggleFlowStep(stationId, stepId, traineeName){
+  const user = currentUser();
+  if(!(traineeName && user && user.role==='trainee' && user.name===traineeName)){ showToast('只有學員本人登入後才能勾選'); return; }
+  if(!DB.flowProgress) DB.flowProgress = {};
+  const key = progressKey(stationId, traineeName);
+  const arr = (DB.flowProgress[key]||[]).slice();
+  const i = arr.indexOf(stepId);
+  if(i>-1) arr.splice(i,1); else arr.push(stepId);
+  DB.flowProgress[key] = arr;
+  await persist();
+  renderApp();
+}
+async function openFlowStepModal(stId, gId, xId){
+  const st = findStation(stId);
+  const g = st && (st.flow||[]).find(g=>g.id===gId);
+  const x = g && g.steps.find(x=>x.id===xId);
+  if(!x) return;
+  openModal(`<div class="modal-top"><h4>${flowEsc(x.text)}</h4><button class="modal-close" onclick="closeModal()">✕</button></div><p style="font-size:12px;color:var(--ink-soft);text-align:center;padding:16px 0;">載入中…</p>`);
+  const attHtml = await renderViewerAttachmentsAsync(x.attachments);
+  openModal(`
+    <div class="modal-top"><h4>${flowEsc(x.text)}</h4><button class="modal-close" onclick="closeModal()">✕</button></div>
+    ${x.image ? `<img class="modal-img" src="${escAttr(x.image)}" alt="${escAttr(x.text)}">` : ''}
+    ${attHtml}
+    ${x.detail ? `<p style="font-size:13px;white-space:pre-wrap;line-height:1.65;">${flowEsc(x.detail)}</p>` : ''}
+    <button class="btn btn-primary btn-block" onclick="closeModal()">關閉</button>
+  `);
+}
+
+/* ---- 後台：工作流程編輯 ---- */
+function renderFlowEditor(st){
+  const groups = st.flow || [];
+  const html = groups.map((g,gi)=>`
+    <div class="card" style="padding:12px;margin-bottom:10px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;gap:6px;flex-wrap:wrap;">
+        <b style="font-size:13px;">${gi+1}. ${flowEsc(g.title)}</b>
+        <div>
+          <button class="mini-edit" onclick="moveFlowGroup('${st.id}','${g.id}',-1)" ${gi===0?'disabled style="opacity:.3;"':''}>↑</button>
+          <button class="mini-edit" onclick="moveFlowGroup('${st.id}','${g.id}',1)" ${gi===groups.length-1?'disabled style="opacity:.3;"':''}>↓</button>
+          <button class="mini-edit" onclick="renameFlowGroup('${st.id}','${g.id}')">重新命名</button>
+          <button class="mini-x" onclick="deleteFlowGroup('${st.id}','${g.id}')">✕</button>
+        </div>
+      </div>
+      ${g.steps.map((x,xi)=>`
+        <div class="admin-item-row">
+          <div class="t">${flowEsc(x.text)} ${x.important?'<span class="pill-tag" style="background:var(--danger-tint);color:var(--danger);">重點</span>':''} ${(x.image||(x.attachments&&x.attachments.length))?'<span class="pill-tag tag-sky">有圖／附件</span>':''}</div>
+          <button class="mini-edit" onclick="moveFlowStep('${st.id}','${g.id}','${x.id}',-1)" ${xi===0?'disabled style="opacity:.3;"':''}>↑</button>
+          <button class="mini-edit" onclick="moveFlowStep('${st.id}','${g.id}','${x.id}',1)" ${xi===g.steps.length-1?'disabled style="opacity:.3;"':''}>↓</button>
+          <button class="mini-edit" onclick="editFlowStep('${st.id}','${g.id}','${x.id}')">編輯</button>
+          <button class="mini-x" onclick="deleteFlowStep('${st.id}','${g.id}','${x.id}')">✕</button>
+        </div>`).join('')}
+      <button class="btn btn-ghost btn-sm" style="margin-top:4px;" onclick="addFlowStep('${st.id}','${g.id}')">＋ 新增步驟</button>
+    </div>`).join('');
+  return html + `<button class="btn btn-outline btn-block" onclick="addFlowGroup('${st.id}')">＋ 新增時段（例如：早班開店、中午、下班前）</button>`;
+}
+function flowFind(stId, gId, xId){
+  const st = findStation(stId);
+  const g = st && (st.flow||[]).find(g=>g.id===gId);
+  const x = g && xId ? g.steps.find(x=>x.id===xId) : null;
+  return {st, g, x};
+}
+function flowMove(arr, id, dir){
+  const i = arr.findIndex(a=>a.id===id), j = i+dir;
+  if(i<0 || j<0 || j>=arr.length) return;
+  const t = arr[i]; arr[i] = arr[j]; arr[j] = t;
+}
+async function addFlowGroup(stId){
+  const st = findStation(stId); if(!st.flow) st.flow = [];
+  const name = prompt('時段名稱（例如：08:00–09:00 開店準備）', '');
+  if(name === null) return;
+  st.flow.push({id:uid('fg'), title:name.trim() || '新時段', steps:[]});
+  await persist(); renderApp();
+}
+async function renameFlowGroup(stId, gId){
+  const {g} = flowFind(stId, gId); if(!g) return;
+  const name = prompt('時段名稱', g.title);
+  if(name === null || !name.trim()) return;
+  g.title = name.trim(); await persist(); renderApp();
+}
+async function deleteFlowGroup(stId, gId){
+  const {st, g} = flowFind(stId, gId); if(!g) return;
+  if(!confirm(`確定要刪除時段「${g.title}」與底下的 ${g.steps.length} 個步驟嗎？`)) return;
+  st.flow = st.flow.filter(x=>x.id!==gId);
+  await persist(); renderApp();
+  g.steps.forEach(x=>(x.attachments||[]).forEach(a=>deleteAttachmentAndPages(a)));
+}
+async function moveFlowGroup(stId, gId, dir){
+  const {st} = flowFind(stId, gId); if(!st) return;
+  flowMove(st.flow, gId, dir); await persist(); renderApp();
+}
+async function addFlowStep(stId, gId){
+  const {g} = flowFind(stId, gId); if(!g) return;
+  const x = {id:uid('fs'), text:'新步驟', detail:'', important:false, image:'', attachments:[]};
+  g.steps.push(x);
+  await persist();
+  renderApp();
+  editFlowStep(stId, gId, x.id);
+}
+async function deleteFlowStep(stId, gId, xId){
+  const {g, x} = flowFind(stId, gId, xId); if(!x) return;
+  if(!confirm(`確定要刪除步驟「${x.text}」嗎？`)) return;
+  g.steps = g.steps.filter(s=>s.id!==xId);
+  await persist(); renderApp();
+  (x.attachments||[]).forEach(a=>deleteAttachmentAndPages(a));
+}
+async function moveFlowStep(stId, gId, xId, dir){
+  const {g} = flowFind(stId, gId); if(!g) return;
+  flowMove(g.steps, xId, dir); await persist(); renderApp();
+}
+function editFlowStep(stId, gId, xId){
+  const {x} = flowFind(stId, gId, xId); if(!x) return;
+  openModal(`
+    <div class="modal-top"><h4>編輯流水步驟</h4><button class="modal-close" onclick="closeModal()">✕</button></div>
+    <div class="form-group"><label>步驟標題</label><input type="text" id="edit-fs-text" value="${escAttr(x.text)}"></div>
+    <div class="form-group"><label>詳細說明</label><textarea id="edit-fs-detail" style="min-height:120px;">${flowEsc(x.detail||'')}</textarea></div>
+    <div class="form-group"><label style="display:flex;gap:8px;align-items:center;"><input type="checkbox" id="edit-fs-important" ${x.important?'checked':''} style="width:auto;"> 標記為重點／注意</label></div>
+    <div class="form-group"><label>圖片網址（選填，也可用下方上傳檔案）</label><input type="text" id="edit-fs-image" value="${escAttr(x.image||'')}"></div>
+    <div class="subhead" style="margin-top:14px;">附件（圖片／PDF／Word）</div>
+    ${renderAdminAttachmentChips(x.attachments, `removeFlowAttachment('${stId}','${gId}','${xId}',`)}
+    <input type="file" id="fs-att-input" accept="image/*,.pdf,.doc,.docx" multiple style="width:100%;margin-bottom:6px;">
+    <p style="font-size:11px;color:var(--ink-soft);margin:0 0 8px;">單檔請控制在 700KB 以內。</p>
+    <button class="btn btn-ghost btn-block" style="margin-bottom:6px;" onclick="uploadFlowAttachments('${stId}','${gId}','${xId}')">上傳選取的檔案</button>
+    <div id="fs-att-status" style="margin-bottom:10px;"></div>
+    <button class="btn btn-primary btn-block" onclick="saveFlowStep('${stId}','${gId}','${xId}')">儲存</button>
+  `);
+}
+function applyFlowModalFields(x){
+  forceCommitActiveInput();
+  const t = document.getElementById('edit-fs-text');
+  if(!t) return;
+  x.text = t.value.trim() || x.text;
+  x.detail = document.getElementById('edit-fs-detail').value;
+  x.important = document.getElementById('edit-fs-important').checked;
+  x.image = document.getElementById('edit-fs-image').value.trim();
+}
+async function saveFlowStep(stId, gId, xId){
+  const {x} = flowFind(stId, gId, xId); if(!x) return;
+  applyFlowModalFields(x);
+  await persist(); closeModal(); renderApp(); showToast('已儲存流水步驟');
+}
+async function uploadFlowAttachments(stId, gId, xId){
+  const {x} = flowFind(stId, gId, xId); if(!x) return;
+  const input = document.getElementById('fs-att-input');
+  const files = Array.from((input && input.files) || []);
+  if(!files.length){ setUploadStatus('fs-att-status', '<p style="color:var(--danger);font-size:11.5px;">請先選擇檔案</p>'); return; }
+  setUploadStatus('fs-att-status', '<p style="color:var(--ink-soft);font-size:11.5px;">上傳中，請稍候…</p>');
+  applyFlowModalFields(x);
+  const newAtts = [], errors = [];
+  for(const file of files){
+    if(file.size > MAX_ATTACHMENT_BYTES){ errors.push(`${file.name} 超過 ${humanFileSize(MAX_ATTACHMENT_BYTES)}`); continue; }
+    try{ newAtts.push(await processUploadedFile(file)); }
+    catch(e){ console.error(e); errors.push(`${file.name} 上傳失敗：${e.message||e}`); }
+  }
+  x.attachments = (x.attachments||[]).concat(newAtts);
+  await persist();
+  editFlowStep(stId, gId, xId);
+  setUploadStatus('fs-att-status', errors.length
+    ? `<p style="color:var(--danger);font-size:11.5px;">已上傳 ${newAtts.length} 個檔案；失敗：${errors.join('；')}</p>`
+    : `<p style="color:var(--primary-dk);font-size:11.5px;">✓ 已上傳 ${newAtts.length} 個檔案</p>`);
+}
+async function removeFlowAttachment(stId, gId, xId, attId){
+  const {x} = flowFind(stId, gId, xId); if(!x) return;
+  const removed = (x.attachments||[]).find(a=>a.id===attId);
+  applyFlowModalFields(x);
+  x.attachments = (x.attachments||[]).filter(a=>a.id!==attId);
+  await persist();
+  if(removed) deleteAttachmentAndPages(removed);
+  editFlowStep(stId, gId, xId);
 }
 
 async function resetStationProgress(stationId, traineeName){
@@ -3067,6 +3288,7 @@ async function resetStationProgress(stationId, traineeName){
 }
 
 async function openStation(id, traineeName, dateStr){
+  if(S.stationId !== id || S.view !== 'station-detail') S.stationTab = 'points';
   S.stationId=id;
   S.stationViewDate = dateStr || todayStr();
   const user = currentUser();
@@ -3933,6 +4155,9 @@ function renderStationEditor(stationId){
     <div class="subhead">工作檢核表</div>
     ${catList}
     <button class="btn btn-outline btn-block" onclick="addCategory('${st.id}')">＋ 新增檢核分類</button>
+
+    <div class="subhead">工作流程（依時段分組）</div>
+    ${renderFlowEditor(st)}
 
     <div class="subhead">異常事件</div>
     ${incidentHtml}
