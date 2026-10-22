@@ -4109,6 +4109,23 @@ async function deleteQuizQuestion(qId){
   renderApp();
   imgIds.forEach(id=>deleteAttachmentDoc(id).catch(()=>{}));
 }
+async function clearAllQuizQuestions(){
+  const bank = DB.quizBank || [];
+  if(!bank.length){ showToast('目前題庫已經是空的'); return; }
+  if(!confirm(`確定要清空全部題庫嗎？\n\n目前共 ${bank.length} 題，會全部刪除，連同題目與選項用到的圖片。\n\n・「分類對應站別」的設定會保留\n・學員過去的考核紀錄不受影響\n・此動作無法復原（建議先下載題庫 Excel 留底）`)) return;
+  const imgIds = [];
+  bank.forEach(q=>{
+    if(q.questionImage) imgIds.push(q.questionImage);
+    if(q.optionImages) Object.values(q.optionImages).forEach(v=>{ if(v) imgIds.push(v); });
+  });
+  DB.quizBank = [];
+  await persist();
+  renderApp();
+  showToast(`已清空全部題庫（共 ${bank.length} 題）`);
+  // 圖片附件在背景逐一刪除，失敗不影響題庫已清空
+  imgIds.forEach(id=>deleteAttachmentDoc(id).catch(()=>{}));
+  window.__quizImgCache = {};
+}
 function renderAdminQuizRow(q){
   const hasAnswer = q.correctAnswers && q.correctAnswers.length;
   return `
@@ -4150,6 +4167,14 @@ function renderAdminQuiz(){
       可將系統目前最新的題庫資料（含後台編輯過、尚未存回 Excel 的內容）下載成 Excel 檔，方便備份或離線查看。下載檔為文字內容，題目與選項的圖片不會包含在檔案中，需至系統內查看。
     </p>
     <button class="btn btn-outline btn-block" ${!totalQ?'disabled':''} onclick="exportQuizBankExcel()">📤 下載目前題庫（Excel）</button>
+  </div>
+
+  <div class="subhead">清空題庫</div>
+  <div class="card">
+    <p style="font-size:12px;color:var(--ink-soft);margin:0 0 10px;line-height:1.6;">
+      一次刪除所有題目與其圖片。「分類對應站別」設定與學員過去的考核紀錄會保留。此動作無法復原，建議先下載題庫留底。
+    </p>
+    <button class="btn btn-danger btn-block" ${!totalQ?'disabled':''} onclick="clearAllQuizQuestions()">🗑 清空全部題庫（${totalQ} 題）</button>
   </div>
 
   <div class="subhead">分類/班別 對應站別</div>
