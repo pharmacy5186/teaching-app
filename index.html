@@ -6,7 +6,9 @@
 <title>站別教學指引 · On-the-spot Teaching</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Noto+Serif+TC:wght@700&family=Noto+Sans+TC:wght@400;700&family=IBM+Plex+Mono:wght@500&display=swap" rel="stylesheet">
+<!-- 字型改成「非阻塞載入」：就算 fonts.googleapis.com 很慢或被擋，也不會卡住整個畫面，字型載好後才自動套用 -->
+<link href="https://fonts.googleapis.com/css2?family=Noto+Serif+TC:wght@700&family=Noto+Sans+TC:wght@400;700&family=IBM+Plex+Mono:wght@500&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
+<noscript><link href="https://fonts.googleapis.com/css2?family=Noto+Serif+TC:wght@700&family=Noto+Sans+TC:wght@400;700&family=IBM+Plex+Mono:wght@500&display=swap" rel="stylesheet"></noscript>
 <style>
 :root{
   --bg:#F2F5F1;
@@ -421,9 +423,10 @@ table.sched-table td:nth-child(4),table.sched-table th:nth-child(4){white-space:
     await loadScriptOnce('https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js');
   }
 </script>
-<script src="https://www.gstatic.com/firebasejs/10.7.0/firebase-app-compat.js"></script>
-<script src="https://www.gstatic.com/firebasejs/10.7.0/firebase-firestore-compat.js"></script>
-<script src="https://www.gstatic.com/firebasejs/10.7.0/firebase-auth-compat.js"></script>
+<!-- defer：不再擋住頁面顯示；三支仍會依順序下載並在畫面解析完成後執行，init 會等它們載入完才開始 -->
+<script defer src="https://www.gstatic.com/firebasejs/10.7.0/firebase-app-compat.js"></script>
+<script defer src="https://www.gstatic.com/firebasejs/10.7.0/firebase-firestore-compat.js"></script>
+<script defer src="https://www.gstatic.com/firebasejs/10.7.0/firebase-auth-compat.js"></script>
 </head>
 <body>
 <div id="app"></div>
@@ -774,11 +777,9 @@ function pdfNav(attId, viewerId, dir){
 async function fetchAttachmentForViewing(stub){
   try{
     if(stub.type==='pdf'){
-      const pages = [];
-      for(let i=1;i<=(stub.pageCount||0);i++){
-        const doc = await loadAttachmentDoc(`${stub.id}_p${i}`);
-        if(doc && doc.data) pages.push(doc.data);
-      }
+      // 各頁同時讀取（原本是一頁讀完才讀下一頁），Promise.all 會維持頁面原本順序
+      const docs = await Promise.all(Array.from({length: stub.pageCount||0}, (_,k)=>loadAttachmentDoc(`${stub.id}_p${k+1}`)));
+      const pages = docs.filter(d=>d && d.data).map(d=>d.data);
       return {...stub, pages};
     }
     const doc = await loadAttachmentDoc(stub.id);
@@ -2345,7 +2346,7 @@ function buildDefaultData(){
   const employees = employeeSeed.map(e => ({id:uid('emp'), empNo:e.empNo, name:e.name, role:e.role}));
   const roster = [];
 
-  return {stations, progress:{}, user:{name:'王小明', role:'實習生'}, employees, roster, codeMap, currentUserId:null, adminPassword:'0000', learningLog:[], progressLocks:{}, quizBank:[], quizCategoryMap:[], quizAttempts:[]};
+  return {stations, progress:{}, user:{name:'王小明', role:'實習生'}, employees, roster, codeMap, currentUserId:null, adminPassword:'0000', progressLocks:{}, quizBank:[], quizCategoryMap:[]};
 }
 function withIncidentCategories(data){
   data.stations.forEach(st=>{
@@ -2388,6 +2389,27 @@ let DB = null;
 let firebaseConfigMissing = false;
 
 let dbLoadFailed = false;
+const DB_READ_TIMEOUT_MS = 30000;   // 每次讀取最多等 30 秒
+const DB_READ_MAX_ATTEMPTS = 3;     // 第一次 + 自動重試 2 次
+function sleepMs(ms){ return new Promise(r=>setTimeout(r, ms)); }
+// 只有「讀取」這一步會重試；讀到之後的處理流程不重試
+async function readMainDocWithRetry(){
+  let lastErr = null;
+  for(let attempt=1; attempt<=DB_READ_MAX_ATTEMPTS; attempt++){
+    try{
+      if(attempt>1 && typeof updateLoadingMessage === 'function') updateLoadingMessage(`連線較慢，正在重試（第 ${attempt-1} 次）…`);
+      return await withTimeout(
+        firestoreDb.collection(FIRESTORE_DOC_PATH[0]).doc(FIRESTORE_DOC_PATH[1]).get(),
+        DB_READ_TIMEOUT_MS, '資料庫讀取'
+      );
+    }catch(e){
+      lastErr = e;
+      console.warn(`資料庫讀取第 ${attempt} 次失敗`, e);
+      if(attempt < DB_READ_MAX_ATTEMPTS) await sleepMs(1500 * attempt);
+    }
+  }
+  throw lastErr || new Error('資料庫讀取失敗');
+}
 async function loadDB(){
   const ok = initFirebase();
   if(!ok){
@@ -2396,7 +2418,7 @@ async function loadDB(){
     return;
   }
   try{
-    const doc = await firestoreDb.collection(FIRESTORE_DOC_PATH[0]).doc(FIRESTORE_DOC_PATH[1]).get();
+    const doc = await readMainDocWithRetry();
     if(doc.exists){
       DB = doc.data();
       baseDB = cloneJSON(DB);
@@ -2424,11 +2446,10 @@ function migrateDB(){
   if(!DB.codeMap) DB.codeMap = [];
   if(typeof DB.currentUserId === 'undefined') DB.currentUserId = null;
   if(!DB.adminPassword) DB.adminPassword = '0000';
-  if(!DB.learningLog) DB.learningLog = [];
+  // learningLog / quizAttempts 已搬到獨立集合，這裡不再建立這兩個欄位（舊資料由 migrateLegacyLogsToCollections 負責搬移）
   if(!DB.progressLocks) DB.progressLocks = {};
   if(!DB.quizBank) DB.quizBank = [];
   if(!DB.quizCategoryMap) DB.quizCategoryMap = [];
-  if(!DB.quizAttempts) DB.quizAttempts = [];
   if(!DB.flowProgress) DB.flowProgress = {};
   if(!DB.ppTabs) DB.ppTabs = [];
   (DB.stations||[]).forEach(st=>{ if(!st.flow) st.flow = []; });
@@ -2458,9 +2479,156 @@ async function cleanupOldBackups(){
   const snap = await firestoreDb.collection(BACKUPS_COLLECTION).get();
   const ids = snap.docs.map(d=>d.id).sort(); // 日期字串格式 YYYY-MM-DD，字串排序等同時間排序
   if(ids.length <= MAX_BACKUPS_TO_KEEP) return;
-  const toDelete = ids.slice(0, ids.length - MAX_BACKUPS_TO_KEEP);
+  // 「premigrate_」開頭的是資料遷移前的保命備份，不算在 30 天輪替裡，也絕不自動刪除
+  const dated = ids.filter(id=>!id.startsWith('premigrate_'));
+  if(dated.length <= MAX_BACKUPS_TO_KEEP) return;
+  const toDelete = dated.slice(0, dated.length - MAX_BACKUPS_TO_KEEP);
   for(const id of toDelete){
     await firestoreDb.collection(BACKUPS_COLLECTION).doc(id).delete();
+  }
+}
+
+/* =========================================================
+   學習紀錄 / 考核紀錄：獨立集合（每筆一份文件，不再放進主資料庫文件）
+   - pharmacy_teaching_app_logs：每次勾選／取消勾選一筆
+   - pharmacy_teaching_app_quiz_attempts：每次考核一筆（含題目快照）
+   讀取時只查「某一位學員」的資料，所以不管累積多少筆，開啟 App 都不會變慢。
+   ========================================================= */
+const LOGS_COLLECTION = 'pharmacy_teaching_app_logs';
+const QUIZ_ATTEMPTS_COLLECTION = 'pharmacy_teaching_app_quiz_attempts';
+// Firestore 不接受 undefined 欄位，先用 JSON 轉一圈把它們去掉
+function sanitizeForFirestore(obj){ return JSON.parse(JSON.stringify(obj)); }
+function saveLogEntry(entry){
+  if(!firebaseReady) return Promise.resolve();
+  return firestoreDb.collection(LOGS_COLLECTION).doc(entry.id).set(sanitizeForFirestore(entry))
+    .catch(e=>{ console.error('學習紀錄儲存失敗', e); showToast('學習紀錄儲存失敗，請檢查網路連線'); });
+}
+function saveQuizAttemptDoc(attempt){
+  if(!firebaseReady) return Promise.resolve();
+  return firestoreDb.collection(QUIZ_ATTEMPTS_COLLECTION).doc(attempt.id).set(sanitizeForFirestore(attempt))
+    .catch(e=>{ console.error('考核紀錄儲存失敗', e); showToast('考核紀錄儲存失敗，請檢查網路連線'); });
+}
+async function queryByTrainee(collectionName, traineeName){
+  if(!firebaseReady) return [];
+  const snap = await firestoreDb.collection(collectionName).where('traineeName','==',traineeName).get();
+  return snap.docs.map(d=>{ const data = d.data(); if(!data.id) data.id = d.id; return data; });
+}
+function sortAttemptsNewestFirst(arr){ return arr.slice().sort((a,b)=>(b.ts||0)-(a.ts||0)); }
+// 學員首頁「我的考核紀錄」：背景讀取，讀完再更新畫面
+async function loadMyQuizAttempts(name){
+  if(S.myAttemptsFor !== name){ S.myAttempts = null; }
+  S.myAttemptsFor = name;
+  S.myAttemptsError = false;
+  try{
+    S.myAttempts = sortAttemptsNewestFirst(await queryByTrainee(QUIZ_ATTEMPTS_COLLECTION, name));
+  }catch(e){
+    console.error('讀取考核紀錄失敗', e);
+    S.myAttemptsError = true;
+    if(!S.myAttempts) S.myAttempts = [];
+  }
+  if(S.view === 'today') renderApp();
+}
+// 後台「學習歷程」：選了學員才查那位學員的紀錄
+async function loadHistoryData(name){
+  S.historyData = {name, loading:true, logs:[], attempts:[], error:false};
+  renderApp();
+  let result;
+  try{
+    const [logs, attempts] = await Promise.all([queryByTrainee(LOGS_COLLECTION, name), queryByTrainee(QUIZ_ATTEMPTS_COLLECTION, name)]);
+    result = {name, loading:false, logs, attempts: sortAttemptsNewestFirst(attempts), error:false};
+  }catch(e){
+    console.error('讀取學習歷程失敗', e);
+    result = {name, loading:false, logs:[], attempts:[], error:true};
+  }
+  if(S.historyData && S.historyData.name === name){ S.historyData = result; renderApp(); }
+}
+function findAttemptById(id){
+  const pools = [S.myAttempts, S.historyData && S.historyData.attempts];
+  for(const p of pools){
+    const a = (p||[]).find(x=>x.id===id);
+    if(a) return a;
+  }
+  return null;
+}
+
+/* ---- 一次性資料遷移：把主文件裡舊的 learningLog / quizAttempts 搬到上面兩個集合 ----
+   安全順序：①先備份整份主文件(premigrate_日期) → ②全部複製到新集合（用原本的 id 當文件 id，重複執行不會產生重複）
+            → ③在 transaction 裡再補搬「這段期間舊版畫面新寫進去的紀錄」，確認都在新集合了才從主文件刪除舊欄位。
+   任何一步失敗都會中止，不會刪掉主文件裡的舊資料，下次開啟 App 會自動再試一次。 */
+let __migratingLogs = false;
+function legacyEntryId(prefix, entry, index){ return (entry && entry.id) ? entry.id : `${prefix}_${index}`; }
+async function migrateLegacyLogsToCollections(){
+  if(__migratingLogs || !firebaseReady || dbLoadFailed || !DB) return;
+  const legacyLogs = Array.isArray(DB.learningLog) ? DB.learningLog : [];
+  const legacyAttempts = Array.isArray(DB.quizAttempts) ? DB.quizAttempts : [];
+  if(!legacyLogs.length && !legacyAttempts.length) return;
+  __migratingLogs = true;
+  S.migratingLogs = true;
+  try{
+    const mainRef = firestoreDb.collection(FIRESTORE_DOC_PATH[0]).doc(FIRESTORE_DOC_PATH[1]);
+    const logsCol = firestoreDb.collection(LOGS_COLLECTION);
+    const attemptsCol = firestoreDb.collection(QUIZ_ATTEMPTS_COLLECTION);
+
+    // ① 遷移前備份（今天已經備份過就不重複建立；備份失敗就整個中止）
+    const backupRef = firestoreDb.collection(BACKUPS_COLLECTION).doc('premigrate_' + todayStr());
+    const backupExisting = await backupRef.get();
+    if(!backupExisting.exists){
+      const mainSnap = await mainRef.get();
+      if(!mainSnap.exists) throw new Error('主資料庫文件不存在，已中止遷移');
+      await backupRef.set({ ...mainSnap.data(), _backedUpAt: new Date().toISOString() });
+    }
+
+    // ② 複製到新集合（分批寫入，每批最多 400 筆）
+    const copiedLogIds = new Set(), copiedAttemptIds = new Set();
+    const writes = [];
+    legacyLogs.forEach((e,i)=>{
+      if(!e) return;
+      const id = legacyEntryId('legacylog', e, i);
+      copiedLogIds.add(id);
+      writes.push({ref: logsCol.doc(id), data: sanitizeForFirestore({...e, id})});
+    });
+    legacyAttempts.forEach((e,i)=>{
+      if(!e) return;
+      const id = legacyEntryId('legacyattempt', e, i);
+      copiedAttemptIds.add(id);
+      writes.push({ref: attemptsCol.doc(id), data: sanitizeForFirestore({...e, id})});
+    });
+    for(let i=0;i<writes.length;i+=400){
+      const batch = firestoreDb.batch();
+      writes.slice(i, i+400).forEach(w=>batch.set(w.ref, w.data));
+      await batch.commit();
+    }
+
+    // ③ transaction：補搬遷移期間新增的紀錄 → 都確認在新集合後，才刪除主文件的舊欄位
+    await firestoreDb.runTransaction(async tx=>{
+      const snap = await tx.get(mainRef);
+      if(!snap.exists) throw new Error('主資料庫文件不存在，已中止遷移');
+      const remote = snap.data();
+      const rLogs = Array.isArray(remote.learningLog) ? remote.learningLog : [];
+      const rAttempts = Array.isArray(remote.quizAttempts) ? remote.quizAttempts : [];
+      const extraLogs = [], extraAttempts = [];
+      rLogs.forEach((e,i)=>{ if(!e) return; const id = legacyEntryId('legacylog', e, i); if(!copiedLogIds.has(id)) extraLogs.push({id, e}); });
+      rAttempts.forEach((e,i)=>{ if(!e) return; const id = legacyEntryId('legacyattempt', e, i); if(!copiedAttemptIds.has(id)) extraAttempts.push({id, e}); });
+      if(extraLogs.length + extraAttempts.length > 400) throw new Error('遷移期間新增的紀錄過多，稍後再遷移');
+      extraLogs.forEach(x=>tx.set(logsCol.doc(x.id), sanitizeForFirestore({...x.e, id:x.id})));
+      extraAttempts.forEach(x=>tx.set(attemptsCol.doc(x.id), sanitizeForFirestore({...x.e, id:x.id})));
+      tx.update(mainRef, {
+        learningLog: firebase.firestore.FieldValue.delete(),
+        quizAttempts: firebase.firestore.FieldValue.delete()
+      });
+    });
+
+    // 雲端已確認瘦身完成，才把本機記憶體裡的舊欄位也一起移除（DB 與 baseDB 必須同步移除，否則下次儲存的合併會判斷錯誤）
+    delete DB.learningLog; delete DB.quizAttempts;
+    if(baseDB){ delete baseDB.learningLog; delete baseDB.quizAttempts; }
+    console.info(`學習紀錄遷移完成：${legacyLogs.length} 筆學習紀錄、${legacyAttempts.length} 筆考核紀錄已搬到獨立集合。`);
+    if(S.view === 'today' && currentUser() && currentUser().role === 'trainee') loadMyQuizAttempts(currentUser().name);
+    if(S.historyTraineeFilter) loadHistoryData(S.historyTraineeFilter);
+  }catch(e){
+    console.error('學習紀錄遷移未完成（主資料庫舊資料原封不動，下次開啟會再試一次）', e);
+  }finally{
+    __migratingLogs = false;
+    S.migratingLogs = false;
   }
 }
 /* =========================================================
@@ -2696,8 +2864,8 @@ async function toggleItem(stationId, itemId, traineeName){
   const item = st ? st.categories.flatMap(c=>c.items).find(i=>i.id===itemId) : null;
   const today = todayStr();
   const auto = await computeAutoSchedule(traineeName, today);
-  if(!DB.learningLog) DB.learningLog = [];
-  DB.learningLog.push({
+  // 學習紀錄改成每筆各自存成獨立文件（pharmacy_teaching_app_logs），不再塞進主資料庫文件
+  saveLogEntry({
     id: uid('log'),
     traineeName,
     stationId,
@@ -2788,14 +2956,17 @@ async function refreshTodayData(){
   if(!user) return;
   const t = todayStr(), tmr = tomorrowStr();
   if(user.role==='trainee'){
+    loadMyQuizAttempts(user.name); // 不等它：考核紀錄在背景讀取，讀完再更新那一小塊畫面
     const [a, b] = await Promise.all([computeAutoSchedule(user.name, t), computeAutoSchedule(user.name, tmr)]);
     S.todayAuto = a; S.todayAutoTmr = b;
   }else if(user.role==='staff'){
     S.todayMentoring = await findTraineesMentoredBy(user.name, t);
   }
 }
-async function enterTodayView(){
-  clearScheduleCache(); // 手動重新整理/進入今日頁時，一律重新向班表系統取得最新資料
+async function enterTodayView(keepFreshCache){
+  // 手動重新整理/切換回今日頁時，一律重新向班表系統取得最新資料；
+  // 只有「剛登入」時保留背景預抓好的班表快取（快取本身 60 秒後就會過期，不會用到舊資料）
+  if(keepFreshCache !== true) clearScheduleCache();
   S.view = 'today';
   S.todayLoading = true;
   renderApp();
@@ -2869,7 +3040,11 @@ function renderTodayTrainee(user){
   </div>`;
 }
 function renderMyQuizAttempts(name){
-  const attempts = traineeQuizAttempts(name);
+  if(S.myAttemptsFor !== name || S.myAttempts === null || typeof S.myAttempts === 'undefined'){
+    return `<p style="font-size:12.5px;color:var(--ink-soft);">考核紀錄載入中…</p>`;
+  }
+  const attempts = S.myAttempts;
+  if(S.myAttemptsError && !attempts.length) return `<p style="font-size:12.5px;color:var(--danger);">考核紀錄讀取失敗，請按上方「重新整理班表資料」再試一次。</p>`;
   if(!attempts.length) return `<p style="font-size:12.5px;color:var(--ink-soft);">目前還沒有考核紀錄，完成站別教學後可以到站別頁面進行考核。</p>`;
   return attempts.map(renderQuizAttemptRow).join('');
 }
@@ -4090,10 +4265,10 @@ function submitQuiz(){
   quiz.result = {score, total: quiz.questions.length, detail};
   const user = currentUser();
   const st = findStation(quiz.stationId);
-  if(!DB.quizAttempts) DB.quizAttempts=[];
   // 把每題的完整內容（題目/選項/圖片參照/正確答案/作答內容/解析）存成快照，
   // 這樣即使之後題庫被修改或刪除，學員與管理者仍能回顧當初考核的完整內容與錯題解析。
-  DB.quizAttempts.push({
+  // 考核紀錄改存到獨立集合（每次考核一份文件），不再放進主資料庫文件。
+  const attemptRecord = {
     id:uid('qa'),
     stationId:quiz.stationId,
     stationName: st?st.name:'（未知站別）',
@@ -4111,8 +4286,15 @@ function submitQuiz(){
         explanation:q.explanation,
       };
     }),
-  });
-  persist();
+  };
+  saveQuizAttemptDoc(attemptRecord);
+  // 同步放進本機快取，這樣學員首頁與「查看詳情」馬上就看得到這次考核
+  if(user && S.myAttemptsFor === user.name && Array.isArray(S.myAttempts)){
+    S.myAttempts = [sanitizeForFirestore(attemptRecord)].concat(S.myAttempts);
+  }else if(user){
+    S.myAttempts = [sanitizeForFirestore(attemptRecord)];
+    S.myAttemptsFor = user.name;
+  }
   renderApp();
   window.scrollTo(0,0);
 }
@@ -4121,9 +4303,8 @@ function exitQuiz(){
   S.quiz=null; S.view='station-detail'; renderApp(); window.scrollTo(0,0); }
 
 /* ---- 考核紀錄（給學員首頁 + 後台學習歷程共用）---- */
-function traineeQuizAttempts(name){
-  return (DB.quizAttempts||[]).filter(a=>a.traineeName===name).sort((a,b)=>b.ts-a.ts);
-}
+// 考核紀錄現在存在獨立集合，由 loadMyQuizAttempts（學員首頁）與 loadHistoryData（後台）按需讀取，
+// 這裡不再有「整份載入」的版本。
 function renderQuizAttemptRow(a){
   const wrongCount = a.total - a.score;
   return `
@@ -4133,14 +4314,14 @@ function renderQuizAttemptRow(a){
   </div>`;
 }
 async function openQuizAttemptReview(attemptId){
-  const a = (DB.quizAttempts||[]).find(x=>x.id===attemptId);
+  const a = findAttemptById(attemptId);
   if(!a) return;
   openModal(`<div class="modal-top"><h4>${escAttr(a.stationName)} 考核紀錄</h4><button class="modal-close" onclick="closeModal()">✕</button></div><p style="font-size:12px;color:var(--ink-soft);text-align:center;padding:16px 0;">載入中…</p>`);
   await prefetchQuizImages(a.questions||[]);
   renderQuizAttemptModal(attemptId);
 }
 function renderQuizAttemptModal(attemptId){
-  const a = (DB.quizAttempts||[]).find(x=>x.id===attemptId);
+  const a = findAttemptById(attemptId);
   if(!a) return;
   const pct = Math.round(a.score/a.total*100);
   const rows = (a.questions||[]).map((q,i)=>{
@@ -4881,7 +5062,7 @@ function renderAdminBackup(){
     <button class="btn btn-outline btn-block" style="margin-bottom:10px;" onclick="setAdminTab('backup')">🔄 重新整理清單</button>
     ${list.length ? list.map(b=>`
       <div class="admin-item-row">
-        <div class="t">📦 ${b.id}${b.backedUpAt?` <span style="color:var(--ink-soft);font-size:11px;">(${new Date(b.backedUpAt).toLocaleString('zh-TW')} 備份)</span>`:''}</div>
+        <div class="t">${b.id.startsWith('premigrate_') ? `🛟 資料遷移前備份 ${b.id.replace('premigrate_','')}` : `📦 ${b.id}`}${b.backedUpAt?` <span style="color:var(--ink-soft);font-size:11px;">(${new Date(b.backedUpAt).toLocaleString('zh-TW')} 備份)</span>`:''}</div>
         <button class="mini-edit" onclick="openStationRestore('${b.id}')">還原單一站別</button>
         <button class="mini-x" style="color:var(--primary-dk);" onclick="restoreFromBackup('${b.id}')">還原到此</button>
       </div>`).join('') : '<p style="font-size:12.5px;color:var(--ink-soft);">目前還沒有任何備份（今天是第一次使用備份功能，明天之後就會開始累積）。</p>'}
@@ -4973,6 +5154,8 @@ async function restoreFromBackup(dateId){
     S.adminTab = 'stations';
     renderApp();
     showToast(`已還原到 ${dateId} 的備份`);
+    // 較舊的備份裡可能還帶著舊的 learningLog / quizAttempts，這裡再自動搬一次到獨立集合（重複執行安全）
+    migrateLegacyLogsToCollections();
   }catch(e){
     console.error('還原失敗', e);
     showToast('還原失敗，請檢查網路連線');
@@ -4984,7 +5167,8 @@ async function restoreFromBackup(dateId){
    ========================================================= */
 function setHistoryTraineeFilter(name){
   S.historyTraineeFilter = name;
-  renderApp();
+  if(name){ loadHistoryData(name); }   // 選了學員才去雲端讀「那一位」的紀錄
+  else { S.historyData = null; renderApp(); }
 }
 function renderAdminHistory(){
   const trainees = DB.employees.filter(e=>e.role==='trainee');
@@ -5024,9 +5208,10 @@ function renderAdminHistory(){
     </div>`;
   }).join('') : '<p style="font-size:12.5px;color:var(--ink-soft);">尚無任何站別資料。</p>';
 
-  const logEntries = (DB.learningLog||[])
+  const hd = (S.historyData && S.historyData.name === name) ? S.historyData : null;
+  const logEntries = (hd ? hd.logs : [])
     .filter(l=>l.traineeName===name && l.checked)
-    .sort((a,b)=>b.timestamp.localeCompare(a.timestamp));
+    .sort((a,b)=>String(b.timestamp||'').localeCompare(String(a.timestamp||'')));
 
   // 依站別分組顯示詳細紀錄
   const logByStation = {};
@@ -5051,10 +5236,15 @@ function renderAdminHistory(){
           <tbody>${rows}</tbody>
         </table>
       </div>`;
-  }).join('') : '<p style="font-size:12.5px;color:var(--ink-soft);">尚無紀錄。</p>';
+  }).join('') : ((!hd || hd.loading) ? '<p style="font-size:12.5px;color:var(--ink-soft);">讀取中…</p>' : '<p style="font-size:12.5px;color:var(--ink-soft);">尚無紀錄。</p>');
+
+  const historyStatus = (hd && hd.error)
+    ? `<div class="empty-note" style="background:var(--danger-tint);color:var(--danger);margin-top:10px;">讀取這位學員的紀錄失敗，請檢查網路連線。<br><button class="btn btn-outline btn-sm" style="margin-top:8px;" onclick="loadHistoryData('${escAttr(name)}')">重新讀取</button></div>`
+    : (S.migratingLogs ? `<div class="empty-note" style="margin-top:10px;">舊的學習紀錄正在搬移到新的儲存位置，搬移完成前，較早期的紀錄可能暫時看不到。完成後請重新選擇學員。</div>` : '');
 
   return `
     ${picker}
+    ${historyStatus}
     <div class="subhead" style="margin-top:14px;">進度總覽（所有站別）</div>
     ${summaryHtml}
     <div class="subhead">考核紀錄</div>
@@ -5065,7 +5255,9 @@ function renderAdminHistory(){
   `;
 }
 function renderTraineeQuizAttemptsAdmin(name){
-  const attempts = traineeQuizAttempts(name);
+  const hd = (S.historyData && S.historyData.name === name) ? S.historyData : null;
+  if(!hd || hd.loading) return '<p style="font-size:12.5px;color:var(--ink-soft);">讀取中…</p>';
+  const attempts = hd.attempts || [];
   if(!attempts.length) return '<p style="font-size:12.5px;color:var(--ink-soft);">尚無考核紀錄。</p>';
   return attempts.map(renderQuizAttemptRow).join('');
 }
@@ -5212,7 +5404,7 @@ async function doLogin(){
   if(!emp){ loginError='查無此員編，請確認後再試一次'; renderApp(); return; }
   loginError='';
   sessionUserId = emp.id; // 只存在記憶體裡，不寫進資料庫
-  await enterTodayView();
+  await enterTodayView(true); // 剛登入：沿用背景預抓好的班表（60 秒內有效）
 }
 async function doLogout(){
   if(!confirm('確定要登出嗎？')) return;
@@ -5337,18 +5529,60 @@ function showFatalError(title, detail){
     </div>`;
 }
 
-(async function init(){
-  document.getElementById('app').innerHTML = '<div style="padding:40px;text-align:center;color:#5B6B65;font-family:sans-serif;">載入中...</div>';
+// 載入中畫面：顯示目前狀態，並在卡超過 8 秒時出現提示與「重新整理」按鈕，讓使用者知道不是當掉
+let __loadingHintTimer = null;
+function showLoadingScreen(msg){
+  const app = document.getElementById('app');
+  if(!app) return;
+  clearTimeout(__loadingHintTimer);
+  app.innerHTML = `<div style="padding:40px 24px;text-align:center;color:#5B6B65;font-family:sans-serif;">
+    <div id="loading-msg" style="font-size:15px;">${msg||'載入中...'}</div>
+    <div id="loading-hint" style="display:none;margin-top:18px;font-size:12.5px;line-height:1.7;">
+      網路比較慢，仍在連線中，請再稍候一下⋯<br>
+      <button onclick="location.reload()" style="margin-top:12px;padding:10px 20px;border-radius:100px;border:1.5px solid #12655C;background:#fff;color:#0A423C;font-weight:700;font-size:13px;cursor:pointer;">重新整理</button>
+    </div>
+  </div>`;
+  __loadingHintTimer = setTimeout(()=>{
+    const h = document.getElementById('loading-hint');
+    if(h) h.style.display = 'block';
+  }, 8000);
+}
+function updateLoadingMessage(msg){
+  const el = document.getElementById('loading-msg');
+  if(el) el.textContent = msg;
+}
+// 背景預抓班表：登入畫面停留的時候就先把今天和明天所屬月份的班表讀回來，登入後的「今日班表」就不用再多等一輪
+function prefetchScheduleInBackground(){
   try{
+    const months = new Set([dateStrToMonthDayKey(todayStr()).monthKey, dateStrToMonthDayKey(tomorrowStr()).monthKey]);
+    months.forEach(m=>{ fetchScheduleMonth(m).catch(()=>{}); });
+  }catch(e){ console.warn('預抓班表失敗（不影響使用）', e); }
+}
+// 等畫面解析完成：defer 的 Firebase 程式庫會在 DOMContentLoaded 之前依序執行完畢（或確定載入失敗）
+function whenDomReady(){
+  return new Promise(resolve=>{
+    if(document.readyState === 'loading') document.addEventListener('DOMContentLoaded', ()=>resolve(), {once:true});
+    else resolve();
+  });
+}
+
+(async function init(){
+  showLoadingScreen('載入中...');
+  try{
+    await whenDomReady();
     if(typeof firebase === 'undefined'){
       showFatalError('Firebase 程式庫載入失敗', 'firebase-app-compat.js 等外部程式庫沒有成功載入，可能是網路連線問題，或瀏覽器/防火牆擋住了 gstatic.com。請檢查網路連線後重新整理頁面。');
       return;
     }
-    initScheduleFirebase().catch(e=>console.error('班表系統連線初始化失敗（不影響主要功能）', e));
-    await withTimeout(loadDB(), 12000, '資料庫連線');
+    // 班表連線與主資料庫「同時」進行，互不等待；班表連上後立刻在背景預抓當月資料
+    initScheduleFirebase().then(ok=>{ if(ok) prefetchScheduleInBackground(); }).catch(e=>console.error('班表系統連線初始化失敗（不影響主要功能）', e));
+    await loadDB(); // loadDB 內部已有逾時與自動重試，這裡不再另外設定較短的逾時
+    clearTimeout(__loadingHintTimer);
     const dow = new Date().getDay();
     S.stationsTab = dow===6 ? 'sat' : (dow===0 ? 'sun' : 'weekday');
     renderApp();
+    // 畫面已經出現後，才在背景把舊的學習／考核紀錄搬到獨立集合（只有第一次需要，不會拖慢開啟速度）
+    migrateLegacyLogsToCollections();
   }catch(e){
     console.error('App 初始化失敗', e);
     showFatalError('載入失敗', '錯誤訊息：' + (e && e.message ? e.message : String(e)));
@@ -5356,10 +5590,13 @@ function showFatalError(title, detail){
 })();
 </script>
 <script>
-// 回到分頁/重新取得焦點時，把雲端最新資料合併進來（沒有本機未存變更時等同重新整理資料）
+// 回到分頁/重新取得焦點時：只有「本機有尚未存入雲端的變更」才執行儲存（同時會合併別台裝置的更動）。
+// 沒有任何變更就不動作，避免每次切回分頁都白白讀取、寫入一次整份資料庫。
 document.addEventListener('visibilitychange', function(){
   if(document.visibilityState === 'visible' && typeof firebaseReady !== 'undefined' && firebaseReady && DB && !dbLoadFailed){
-    persist();
+    try{
+      if(baseDB && !deepEqual(DB, baseDB)) persist();
+    }catch(e){ console.error('檢查未存變更失敗', e); }
   }
 });
 </script>
