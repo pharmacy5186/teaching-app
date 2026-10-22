@@ -3302,6 +3302,7 @@ async function uploadFlowAttachments(stId, gId, xId){
 async function removeFlowAttachment(stId, gId, xId, attId){
   const {x} = flowFind(stId, gId, xId); if(!x) return;
   const removed = (x.attachments||[]).find(a=>a.id===attId);
+  if(!confirm(`確定要移除附件「${removed?removed.name:''}」嗎？檔案會從雲端刪除，無法復原。`)) return;
   applyFlowModalFields(x);
   x.attachments = (x.attachments||[]).filter(a=>a.id!==attId);
   await persist();
@@ -3494,6 +3495,7 @@ async function uploadPPAttachments(tabId, itemId){
 async function removePPAttachment(tabId, itemId, attId){
   const {item:x} = ppFind(tabId, itemId); if(!x) return;
   const removed = (x.attachments||[]).find(a=>a.id===attId);
+  if(!confirm(`確定要移除附件「${removed?removed.name:''}」嗎？檔案會從雲端刪除，無法復原。`)) return;
   applyPPModalFields(x);
   x.attachments = (x.attachments||[]).filter(a=>a.id!==attId);
   await persist();
@@ -3817,6 +3819,7 @@ async function onQuizFileChange(input){
   const file = input.files && input.files[0];
   input.value = '';
   if(!file) return;
+  if(!confirm(`確定要匯入題庫檔案「${file.name}」嗎？\n\n編號相同的題目會被覆蓋更新。`)) return;
   S.quizImporting = true; renderApp();
   try{
     const parsed = await parseQuizExcel(file);
@@ -4074,6 +4077,7 @@ function selectQuizAnswer(qId, letter, type){
 function submitQuiz(){
   const quiz = S.quiz;
   if(!quiz || quiz.submitted) return;
+  if(!confirm('確定要送出考核嗎？送出後就不能再修改答案。')) return;
   let score = 0;
   const detail = quiz.questions.map(q=>{
     const picked = (quiz.answers[q.id]||[]).slice().sort();
@@ -4112,7 +4116,9 @@ function submitQuiz(){
   renderApp();
   window.scrollTo(0,0);
 }
-function exitQuiz(){ S.quiz=null; S.view='station-detail'; renderApp(); window.scrollTo(0,0); }
+function exitQuiz(){
+  if(S.quiz && !S.quiz.submitted && !confirm('確定要取消考核嗎？目前已作答的內容將不會保留。')) return;
+  S.quiz=null; S.view='station-detail'; renderApp(); window.scrollTo(0,0); }
 
 /* ---- 考核紀錄（給學員首頁 + 後台學習歷程共用）---- */
 function traineeQuizAttempts(name){
@@ -4405,6 +4411,8 @@ async function addTeachingPoint(stId){
 }
 async function deleteTeachingPoint(stId, tpId){
   const st = findStation(stId);
+  const tpTarget = st.teachingPoints.find(t=>t.id===tpId);
+  if(!confirm(`確定要刪除教學重點「${tpTarget?tpTarget.title:''}」嗎？此動作無法復原。`)) return;
   st.teachingPoints = st.teachingPoints.filter(t=>t.id!==tpId);
   await persist(); renderApp();
 }
@@ -4481,6 +4489,7 @@ async function removeTpAttachment(stId, tpId, attId){
   const st = findStation(stId);
   const tp = st.teachingPoints.find(t=>t.id===tpId);
   const removed = (tp.attachments||[]).find(a=>a.id===attId);
+  if(!confirm(`確定要移除附件「${removed?removed.name:''}」嗎？檔案會從雲端刪除，無法復原。`)) return;
   const f = captureTpModalFields();
   tp.title = f.title || tp.title; tp.bullets = f.bullets; tp.image = f.image;
   tp.attachments = (tp.attachments||[]).filter(a=>a.id!==attId);
@@ -4528,6 +4537,7 @@ async function deleteCategory(stId, catId){
   const st = findStation(stId);
   const cat = st.categories.find(c=>c.id===catId);
   if(cat && cat.isIncident){ showToast('異常事件記錄分類無法刪除'); return; }
+  if(!confirm(`確定要刪除檢核分類「${cat?cat.title:''}」嗎？\n\n底下的 ${cat?cat.items.length:0} 個檢核項目會一併刪除，此動作無法復原。`)) return;
   st.categories = st.categories.filter(c=>c.id!==catId);
   await persist(); renderApp();
 }
@@ -4540,6 +4550,8 @@ async function addItem(stId, catId){
 async function deleteItem(stId, catId, itemId){
   const st = findStation(stId);
   const cat = st.categories.find(c=>c.id===catId);
+  const delTarget = cat.items.find(i=>i.id===itemId);
+  if(!confirm(`確定要刪除「${delTarget?delTarget.text:''}」嗎？此動作無法復原。`)) return;
   cat.items = cat.items.filter(i=>i.id!==itemId);
   await persist(); renderApp();
 }
@@ -4637,6 +4649,7 @@ function addItemSection(stId, catId, itemId){
   }, 60);
 }
 function removeItemSectionAt(stId, catId, itemId, idx){
+  if(!confirm(`確定要刪除「提醒事項 ${idx+1}」嗎？此動作無法復原。`)) return;
   const current = readSectionsFromModal();
   current.splice(idx,1);
   refreshItemSectionsUI(stId, catId, itemId, current);
@@ -4707,6 +4720,7 @@ async function removeSectionAttachment(stId, catId, itemId, sectionIdx, attId){
   const current = readSectionsFromModal();
   if(!current[sectionIdx]) return;
   const removed = (current[sectionIdx].attachments||[]).find(a=>a.id===attId);
+  if(!confirm(`確定要移除附件「${removed?removed.name:''}」嗎？檔案會從雲端刪除，無法復原。`)) return;
   current[sectionIdx].attachments = (current[sectionIdx].attachments||[]).filter(a=>a.id!==attId);
   refreshItemSectionsUI(stId, catId, itemId, current);
   deleteAttachmentAndPages(removed);
@@ -4769,6 +4783,7 @@ async function removeItemAttachment(stId, catId, itemId, attId){
   const cat = st.categories.find(c=>c.id===catId);
   const item = cat.items.find(i=>i.id===itemId);
   const removed = ((item.detail && item.detail.attachments) || []).find(a=>a.id===attId);
+  if(!confirm(`確定要移除附件「${removed?removed.name:''}」嗎？檔案會從雲端刪除，無法復原。`)) return;
   const remaining = ((item.detail && item.detail.attachments) || []).filter(a=>a.id!==attId);
   if(!item.detail) item.detail = { sections:[], image:'', attachments:[] };
   item.detail.attachments = remaining;
@@ -4836,6 +4851,7 @@ function renderAdminPeople(){
 async function updateAdminPassword(){
   const val = (document.getElementById('new-admin-pw').value||'').trim();
   if(!val){ showToast('請輸入新密碼'); return; }
+  if(!confirm('確定要更新後台管理密碼嗎？更新後立即生效，舊密碼將失效。')) return;
   DB.adminPassword = val;
   await persist();
   showToast('後台密碼已更新');
@@ -5066,10 +5082,14 @@ async function addEmployee(){
 async function updateEmployeeRole(id, role){
   const e = DB.employees.find(x=>x.id===id);
   if(!e) return;
+  const roleZh = {trainee:'學員', staff:'藥師', clerk:'書記'};
+  if(!confirm(`確定要把「${e.name}」的身份從「${roleZh[e.role]||e.role}」改為「${roleZh[role]||role}」嗎？\n\n身份會影響今日班表的自動配對。`)){ renderApp(); return; }
   e.role = role;
   await persist(); renderApp();
 }
 async function deleteEmployee(id){
+  const empTarget = DB.employees.find(e=>e.id===id);
+  if(!confirm(`確定要刪除人員「${empTarget?empTarget.empNo+' '+empTarget.name:''}」嗎？此動作無法復原。`)) return;
   DB.employees = DB.employees.filter(e=>e.id!==id);
   if(sessionUserId===id) sessionUserId=null;
   await persist(); renderApp();
@@ -5082,6 +5102,8 @@ async function addCodeMap(){
   await persist(); renderApp(); showToast('已新增對照');
 }
 async function deleteCodeMap(id){
+  const cmTarget = DB.codeMap.find(c=>c.id===id);
+  if(!confirm(`確定要刪除班別代碼對照「${cmTarget?cmTarget.code:''}」嗎？此動作無法復原。`)) return;
   DB.codeMap = DB.codeMap.filter(c=>c.id!==id);
   await persist(); renderApp();
 }
@@ -5193,6 +5215,7 @@ async function doLogin(){
   await enterTodayView();
 }
 async function doLogout(){
+  if(!confirm('確定要登出嗎？')) return;
   sessionUserId = null;
   S.adminUnlocked = false; // 登出後，下一位使用者要重新輸入後台密碼
   renderApp();
