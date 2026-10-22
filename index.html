@@ -4279,6 +4279,9 @@ function addStation(){
   renderApp();
 }
 async function deleteStation(id){
+  const target = findStation(id);
+  const label = target ? `「${target.name}（${target.code}）」` : '這個站別';
+  if(!confirm(`確定要刪除站別${label}嗎？\n\n站別內的檢核表、教學重點、工作流程都會一併移除。\n（若不小心刪錯，可到「資料備份」使用「還原單一站別」救回。）`)) return;
   DB.stations = DB.stations.filter(s=>s.id!==id);
   await persist();
   renderApp();
@@ -4845,9 +4848,83 @@ function renderAdminBackup(){
     ${list.length ? list.map(b=>`
       <div class="admin-item-row">
         <div class="t">📦 ${b.id}${b.backedUpAt?` <span style="color:var(--ink-soft);font-size:11px;">(${new Date(b.backedUpAt).toLocaleString('zh-TW')} 備份)</span>`:''}</div>
+        <button class="mini-edit" onclick="openStationRestore('${b.id}')">還原單一站別</button>
         <button class="mini-x" style="color:var(--primary-dk);" onclick="restoreFromBackup('${b.id}')">還原到此</button>
       </div>`).join('') : '<p style="font-size:12.5px;color:var(--ink-soft);">目前還沒有任何備份（今天是第一次使用備份功能，明天之後就會開始累積）。</p>'}
   `;
+}
+/* ---- 只還原單一站別（僅限目前資料庫已不存在的站別；其餘資料完全不動） ---- */
+async function openStationRestore(dateId){
+  openModal(`<div class="modal-top"><h4>還原單一站別</h4><button class="modal-close" onclick="closeModal()">✕</button></div><p style="font-size:12px;color:var(--ink-soft);text-align:center;padding:16px 0;">讀取備份中…</p>`);
+  try{
+    const doc = await firestoreDb.collection(BACKUPS_COLLECTION).doc(dateId).get();
+    if(!doc.exists){ closeModal(); showToast('找不到這份備份'); return; }
+    const stations = doc.data().stations || [];
+    const rows = stations.map(st=>{
+      const exists = !!findStation(st.id);
+      const items = (st.categories||[]).filter(c=>!c.isIncident).reduce((a,c)=>a+(c.items||[]).length,0);
+      return `
+      <div class="admin-item-row" style="${exists?'opacity:.55;':''}">
+        <div class="t">${escAttr(st.emoji||'')} <b>${escAttr(st.name)}</b>（${escAttr(st.code)}）<br><span style="font-size:11px;color:var(--ink-soft);">${items} 項檢核 · ${exists?'目前存在，不需還原':'<b style="color:var(--danger);">目前已不存在，可還原</b>'}</span></div>
+        ${exists ? '' : `<button class="btn btn-primary btn-sm" onclick="restoreStationFromBackup('${escAttr(dateId)}','${escAttr(st.id)}')">還原</button>`}
+      </div>`;
+    }).join('');
+    openModal(`
+      <div class="modal-top"><h4>還原單一站別（${escAttr(dateId)} 備份）</h4><button class="modal-close" onclick="closeModal()">✕</button></div>
+      <p style="font-size:11.5px;color:var(--ink-soft);margin:0 0 10px;">只會把選到的站別放回目前資料庫，其他資料（學員進度、考核紀錄、其他站別）完全不動。目前仍存在的站別不能還原，避免覆蓋現有內容。</p>
+      ${rows || '<p style="font-size:12.5px;color:var(--ink-soft);">這份備份裡沒有站別資料。</p>'}
+    `);
+  }catch(e){
+    console.error('讀取備份失敗', e);
+    closeModal(); showToast('讀取備份失敗，請檢查網路連線');
+  }
+}
+async function restoreStationFromBackup(dateId, stationId){
+  if(findStation(stationId)){ showToast('這個站別目前還存在，不需要還原'); return; }
+  try{
+    const bdoc = await firestoreDb.collection(BACKUPS_COLLECTION).doc(dateId).get();
+    if(!bdoc.exists){ showToast('找不到這份備份'); return; }
+    const bData = bdoc.data();
+    const bStations = bData.stations || [];
+    const bIdx = bStations.findIndex(s=>s.id===stationId);
+    if(bIdx===-1){ showToast('備份裡找不到這個站別'); return; }
+    const bSt = cloneJSON(bStations[bIdx]);
+    if(!confirm(`確定要從「${dateId}」的備份還原站別「${bSt.name}（${bSt.code}）」嗎？\n\n只會新增這個站別，其他資料不會被更動。`)) return;
+
+    await ensureDailyBackup();
+    const ref = firestoreDb.collection(FIRESTORE_DOC_PATH[0]).doc(FIRESTORE_DOC_PATH[1]);
+    let result = null;
+    await firestoreDb.runTransaction(async tx=>{
+      const snap = await tx.get(ref);
+      if(!snap.exists) throw new Error('主資料庫文件不存在，已中止還原');
+      const remote = snap.data();
+      if(!remote.stations) remote.stations = [];
+      if(remote.stations.some(s=>s.id===stationId)) throw new Error('這個站別在雲端已經存在（可能剛被別人還原），已中止');
+      // 位置：放在備份中「排在它前面、且目前仍存在」的最近一個站別之後
+      let insertAt = 0;
+      for(let i=bIdx-1;i>=0;i--){
+        const pos = remote.stations.findIndex(s=>s.id===bStations[i].id);
+        if(pos>-1){ insertAt = pos+1; break; }
+      }
+      remote.stations.splice(insertAt, 0, bSt);
+      // 班別代碼對照：只補缺少的（以 代碼＋站別 判斷），不動既有項目
+      if(!remote.codeMap) remote.codeMap = [];
+      (bData.codeMap||[]).filter(c=>c.stationId===stationId).forEach(c=>{
+        if(!remote.codeMap.some(x=>x.code===c.code && x.stationId===stationId)) remote.codeMap.push(cloneJSON(c));
+      });
+      tx.set(ref, remote);
+      result = remote;
+    });
+    DB = cloneJSON(result);
+    baseDB = cloneJSON(result);
+    migrateDB();
+    closeModal();
+    renderApp();
+    showToast(`已還原站別「${bSt.name}」`);
+  }catch(e){
+    console.error('單一站別還原失敗', e);
+    showToast('還原失敗：'+(e&&e.message?e.message:'請檢查網路連線'));
+  }
 }
 async function restoreFromBackup(dateId){
   if(!confirm(`確定要把資料庫還原到「${dateId}」那天開始前的狀態嗎？\n\n這會覆蓋掉現在的所有資料（包含還原之後才做的修改），此動作無法復原，請先確認清楚。`)) return;
