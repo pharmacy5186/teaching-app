@@ -460,7 +460,8 @@ function initFirebase(){
     firebase.initializeApp(firebaseConfig);
     firestoreDb = firebase.firestore();
     // 自動偵測網路環境，避免 WebChannel 被擋時卡很久才連上
-    try{ firestoreDb.settings({ experimentalAutoDetectLongPolling:true, merge:true }); }catch(e){ console.warn('Firestore settings 略過', e); }
+    // 直接指定長輪詢（不再自動偵測）：手機行動網路、院內代理網路上，預設的 WebChannel 連線常常卡住不動
+    try{ firestoreDb.settings({ experimentalForceLongPolling:true, merge:true }); }catch(e){ console.warn('Firestore settings 略過', e); }
     firebaseReady = true;
     return true;
   }catch(e){
@@ -490,7 +491,7 @@ async function initScheduleFirebase(){
   try{
     const scheduleApp = firebase.initializeApp(scheduleFirebaseConfig, 'scheduleReadOnlyApp');
     scheduleDb = scheduleApp.firestore();
-    try{ scheduleDb.settings({ experimentalAutoDetectLongPolling:true, merge:true }); }catch(e){}
+    try{ scheduleDb.settings({ experimentalForceLongPolling:true, merge:true }); }catch(e){}
     scheduleDbReady = true;
     // 對方規則要求連線先經過驗證身份，匿名登入即可符合，不需要真實帳密
     const scheduleAuth = scheduleApp.auth();
@@ -2389,7 +2390,11 @@ let DB = null;
 let firebaseConfigMissing = false;
 
 let dbLoadFailed = false;
-const DB_READ_TIMEOUT_MS = 30000;   // 每次讀取最多等 30 秒
+const DB_READ_TIMEOUT_MS = 15000;   // 每次讀取最多等 15 秒（失敗會自動重試，不用乾等太久）
+let dbLoadDiagnostics = [];         // 載入各步驟的結果與耗時，失敗時顯示在鎖定畫面上方便診斷
+function diagLog(msg){
+  dbLoadDiagnostics.push(`[${((performance.now())/1000).toFixed(1)}s] ${msg}`);
+}
 const DB_READ_MAX_ATTEMPTS = 3;     // 第一次 + 自動重試 2 次
 function sleepMs(ms){ return new Promise(r=>setTimeout(r, ms)); }
 // 只有「讀取」這一步會重試；讀到之後的處理流程不重試
@@ -2398,12 +2403,16 @@ async function readMainDocWithRetry(){
   for(let attempt=1; attempt<=DB_READ_MAX_ATTEMPTS; attempt++){
     try{
       if(attempt>1 && typeof updateLoadingMessage === 'function') updateLoadingMessage(`連線較慢，正在重試（第 ${attempt-1} 次）…`);
-      return await withTimeout(
+      diagLog(`讀取主資料庫：第 ${attempt} 次開始`);
+      const snap = await withTimeout(
         firestoreDb.collection(FIRESTORE_DOC_PATH[0]).doc(FIRESTORE_DOC_PATH[1]).get(),
         DB_READ_TIMEOUT_MS, '資料庫讀取'
       );
+      diagLog(`讀取主資料庫：第 ${attempt} 次成功`);
+      return snap;
     }catch(e){
       lastErr = e;
+      diagLog(`讀取主資料庫：第 ${attempt} 次失敗 → ${(e && e.code) ? e.code+' ' : ''}${e && e.message ? e.message : e}`);
       console.warn(`資料庫讀取第 ${attempt} 次失敗`, e);
       if(attempt < DB_READ_MAX_ATTEMPTS) await sleepMs(1500 * attempt);
     }
@@ -2436,6 +2445,7 @@ async function loadDB(){
     // 只在記憶體裡暫時顯示示範資料讓畫面不至於完全空白，但「不會」寫回資料庫，
     // 並且會擋住所有畫面、顯示明確錯誤，避免使用者誤以為一切正常而繼續操作、進而把示範資料存進去蓋掉真實資料。
     console.error('Firestore 讀取失敗，為了保護您的真實資料，不會自動寫入任何內容', e);
+    diagLog(`最終失敗 → ${(e && e.code) ? e.code+' ' : ''}${e && e.message ? e.message : e}`);
     dbLoadFailed = true;
     DB = withIncidentCategories(buildDefaultData());
   }
@@ -5433,6 +5443,10 @@ function renderApp(){
             請檢查網路連線，然後點下面的按鈕重試。如果重試後還是這個畫面，請截圖給開發者確認，先不要繼續操作或嘗試儲存任何內容。
           </div>
           <button class="btn btn-primary btn-block" style="margin-top:16px;" onclick="location.reload()">重新整理再試一次</button>
+          <div style="margin-top:18px;">
+            <div style="font-size:12px;font-weight:700;color:var(--ink-soft);margin-bottom:6px;">診斷資訊（請把這一塊連同整個畫面截圖給開發者）</div>
+            <div style="background:var(--ink);color:#CFE7E1;font-family:var(--font-mono);font-size:11px;line-height:1.6;border-radius:var(--radius-sm);padding:10px 12px;white-space:pre-wrap;word-break:break-all;">${escAttr(dbLoadDiagnostics.concat([`網址：${location.protocol}//${location.host}`, `瀏覽器：${navigator.userAgent}`, `連線狀態：${navigator.onLine ? 'online' : 'offline'}`]).join('\n'))}</div>
+          </div>
         </div>
       </div>`;
     return;
@@ -5570,6 +5584,7 @@ function whenDomReady(){
   showLoadingScreen('載入中...');
   try{
     await whenDomReady();
+    diagLog(`頁面與外部程式庫載入階段結束（firebase ${typeof firebase === 'undefined' ? '未載入' : '已載入'}）`);
     if(typeof firebase === 'undefined'){
       showFatalError('Firebase 程式庫載入失敗', 'firebase-app-compat.js 等外部程式庫沒有成功載入，可能是網路連線問題，或瀏覽器/防火牆擋住了 gstatic.com。請檢查網路連線後重新整理頁面。');
       return;
