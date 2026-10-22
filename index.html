@@ -6,7 +6,7 @@
 <title>站別教學指引 · On-the-spot Teaching</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Noto+Serif+TC:wght@500;700;900&family=Noto+Sans+TC:wght@400;500;700&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Noto+Serif+TC:wght@700&family=Noto+Sans+TC:wght@400;700&family=IBM+Plex+Mono:wght@500&display=swap" rel="stylesheet">
 <style>
 :root{
   --bg:#F2F5F1;
@@ -387,16 +387,39 @@ table.sched-table td:nth-child(4),table.sched-table th:nth-child(4){white-space:
 .login-name-box.resolved{color:var(--primary-dk);font-weight:700;background:var(--mint);}
 .login-name-box.notfound{color:var(--danger);background:var(--danger-tint);}
 </style>
-<script defer src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js"></script>
-<script defer src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.4.120/pdf.min.js"></script>
-<script defer src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
-<script defer src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <script>
-  window.addEventListener('load', function(){
-    if(window.pdfjsLib){
-      pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.4.120/pdf.worker.min.js';
+  // 這些函式庫只有管理者上傳檔案／匯入匯出題庫時才會用到，改成用到才下載，加快一般使用者開啟速度
+  const __libPromises = {};
+  function loadScriptOnce(url){
+    if(!__libPromises[url]){
+      __libPromises[url] = new Promise(function(resolve, reject){
+        const el = document.createElement('script');
+        el.src = url;
+        el.onload = function(){ resolve(); };
+        el.onerror = function(){ delete __libPromises[url]; reject(new Error('函式庫載入失敗，請檢查網路連線後再試一次')); };
+        document.head.appendChild(el);
+      });
     }
-  });
+    return __libPromises[url];
+  }
+  async function ensureMammoth(){
+    if(window.mammoth) return;
+    await loadScriptOnce('https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js');
+  }
+  async function ensurePdfjs(){
+    if(!window.pdfjsLib){
+      await loadScriptOnce('https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.4.120/pdf.min.js');
+    }
+    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.4.120/pdf.worker.min.js';
+  }
+  async function ensureXlsx(){
+    if(window.XLSX) return;
+    await loadScriptOnce('https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js');
+  }
+  async function ensureJSZip(){
+    if(window.JSZip) return;
+    await loadScriptOnce('https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js');
+  }
 </script>
 <script src="https://www.gstatic.com/firebasejs/10.7.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.7.0/firebase-firestore-compat.js"></script>
@@ -633,17 +656,8 @@ async function deleteAttachmentDoc(id){
   catch(e){ console.error('刪除附件文件失敗', e); }
 }
 function canvasToDataUrl(canvas, quality){ return canvas.toDataURL('image/jpeg', quality); }
-async function waitForPdfjs(timeoutMs){
-  const start = Date.now();
-  while(typeof window.pdfjsLib === 'undefined'){
-    if(Date.now()-start > timeoutMs) return false;
-    await new Promise(r=>setTimeout(r,100));
-  }
-  return true;
-}
 async function rasterizePdfToPages(file){
-  const ok = await waitForPdfjs(4000);
-  if(!ok) throw new Error('pdf.js 尚未載入完成，請檢查網路連線後重新整理頁面再試一次');
+  await withTimeout(ensurePdfjs(), 20000, 'PDF 函式庫載入');
   const arrayBuffer = await file.arrayBuffer();
   const pdf = await pdfjsLib.getDocument({data: arrayBuffer}).promise;
   const maxPages = Math.min(pdf.numPages, 15); // Firestore 空間有限，多頁 PDF 只保留前15頁
@@ -696,6 +710,7 @@ async function processUploadedFile(file){
     let html = '';
     try{
       const arrayBuffer = await file.arrayBuffer();
+      await withTimeout(ensureMammoth(), 20000, 'Word 函式庫載入');
       const result = await mammoth.convertToHtml({arrayBuffer});
       html = result.value;
       if(html.length > 500000){ html = html.slice(0,500000) + '<p>（內容過長，已截斷）</p>'; }
@@ -3698,6 +3713,7 @@ function parseQuizOptionsText(raw){
 }
 async function parseQuizExcel(file){
   const buf = await file.arrayBuffer();
+  await withTimeout(Promise.all([ensureXlsx(), ensureJSZip()]), 30000, 'Excel 函式庫載入');
   const wb = XLSX.read(buf, {type:'array'});
   const sheetName = wb.SheetNames.find(n=>n.indexOf('說明')===-1) || wb.SheetNames[0];
   const sheetIndex = wb.SheetNames.indexOf(sheetName);
@@ -3766,9 +3782,11 @@ function quizOptionsTextToRaw(q){
     return `${L}. ${txt}`;
   }).join('\n');
 }
-function exportQuizBankExcel(){
+async function exportQuizBankExcel(){
   const bank = DB.quizBank || [];
   if(!bank.length){ showToast('目前題庫是空的，沒有資料可以下載'); return; }
+  try{ await withTimeout(ensureXlsx(), 30000, 'Excel 函式庫載入'); }
+  catch(e){ showToast('Excel 函式庫載入失敗，請檢查網路連線後再試'); return; }
   const header = ['編號','來源檔案','分類/班別','題型','題目','題目圖片','選項文字','選項圖片A','選項圖片B','選項圖片C','選項圖片D','答案','解析'];
   const rows = bank.map(q=>[
     q.no || '',
