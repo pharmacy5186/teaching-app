@@ -418,6 +418,10 @@ table.sched-table td:nth-child(4),table.sched-table th:nth-child(4){white-space:
     if(window.XLSX) return;
     await loadScriptOnce('https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js');
   }
+  async function ensureExcelJS(){
+    if(window.ExcelJS) return;
+    await loadScriptOnce('https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js');
+  }
   async function ensureJSZip(){
     if(window.JSZip) return;
     await loadScriptOnce('https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js');
@@ -3963,42 +3967,118 @@ function quizAnswerLettersToText(q){
   return (q.correctAnswers||[]).join('');
 }
 function quizOptionsTextToRaw(q){
+  // 只輸出「有文字」的選項；圖片型選項不寫文字（與匯入範本格式一致）
   const letters = quizOptionLetters(q);
-  return letters.map(L=>{
-    const txt = (q.optionsText && q.optionsText[L]) || '';
-    return `${L}. ${txt}`;
-  }).join('\n');
+  return letters.filter(L=>q.optionsText && q.optionsText[L]).map(L=>`${L}. ${q.optionsText[L]}`).join('\n');
+}
+function dataUrlToExcelImage(dataUrl){
+  const m = String(dataUrl||'').match(/^data:image\/(png|jpe?g|gif);base64,(.+)$/i);
+  if(!m) return null;
+  const ext = m[1].toLowerCase()==='jpg' ? 'jpeg' : m[1].toLowerCase();
+  return {extension: ext, base64: m[2]};
+}
+function loadImageNaturalSize(dataUrl){
+  return new Promise(resolve=>{
+    const img = new Image();
+    img.onload = ()=>resolve({w:img.naturalWidth||100, h:img.naturalHeight||100});
+    img.onerror = ()=>resolve({w:100, h:100});
+    img.src = dataUrl;
+  });
+}
+// 估算文字儲存格需要的列高（點）：中文字佔 2 個半形寬度
+function estimateCellLines(text, widthChars){
+  if(!text) return 1;
+  let lines = 0;
+  String(text).split(/\r?\n/).forEach(line=>{
+    let w = 0;
+    for(const ch of line) w += (ch.charCodeAt(0) > 255 ? 2 : 1);
+    lines += Math.max(1, Math.ceil(w / Math.max(1, widthChars)));
+  });
+  return lines;
 }
 async function exportQuizBankExcel(){
   const bank = DB.quizBank || [];
   if(!bank.length){ showToast('目前題庫是空的，沒有資料可以下載'); return; }
-  try{ await withTimeout(ensureXlsx(), 30000, 'Excel 函式庫載入'); }
-  catch(e){ showToast('Excel 函式庫載入失敗，請檢查網路連線後再試'); return; }
-  const header = ['編號','來源檔案','分類/班別','題型','題目','題目圖片','選項文字','選項圖片A','選項圖片B','選項圖片C','選項圖片D','答案','解析'];
-  const rows = bank.map(q=>[
-    q.no || '',
-    q.sourceFile || '',
-    q.category || '',
-    q.type==='multi' ? '複選' : '單選',
-    q.questionText || '',
-    q.questionImage ? '（已有圖片，下載檔不含圖片，請至系統內查看）' : '',
-    quizOptionsTextToRaw(q),
-    q.optionImages && q.optionImages.A ? '（已有圖片）' : '',
-    q.optionImages && q.optionImages.B ? '（已有圖片）' : '',
-    q.optionImages && q.optionImages.C ? '（已有圖片）' : '',
-    q.optionImages && q.optionImages.D ? '（已有圖片）' : '',
-    quizAnswerLettersToText(q),
-    q.explanation || '',
-  ]);
-  const aoa = [header, ...rows];
-  const ws = XLSX.utils.aoa_to_sheet(aoa);
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, '題庫');
-  const now = new Date();
-  const pad = n=>String(n).padStart(2,'0');
-  const stamp = `${now.getFullYear()}${pad(now.getMonth()+1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}`;
-  XLSX.writeFile(wb, `題庫匯出_${stamp}.xlsx`);
-  showToast(`已下載目前最新題庫共 ${bank.length} 題（文字內容；圖片請至系統內查看，不包含在下載檔中）`);
+  showToast('正在產生題庫檔案（含圖片），請稍候…');
+  try{ await withTimeout(ensureExcelJS(), 30000, 'Excel 函式庫載入'); }
+  catch(e){ showToast('Excel 函式庫載入失敗，請檢查網路連線後再試一次'); return; }
+  try{
+    await prefetchQuizImages(bank);
+    const cache = window.__quizImgCache || {};
+    const header = ['編號','來源檔案','分類/班別','題型','題目','題目圖片','選項文字','選項圖片A','選項圖片B','選項圖片C','選項圖片D','答案','解析'];
+    const widths = [10,16,12,8,34,16,40,16,16,16,16,8,50];
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('考題資料庫', {views:[{state:'frozen', ySplit:1}]});
+    ws.columns = header.map((h,i)=>({header:h, width:widths[i]}));
+    const hr = ws.getRow(1);
+    hr.height = 20;
+    hr.eachCell(c=>{
+      c.font = {bold:true, color:{argb:'FFFFFFFF'}};
+      c.fill = {type:'pattern', pattern:'solid', fgColor:{argb:'FF4472C4'}};
+      c.alignment = {vertical:'middle', horizontal:'center', wrapText:true};
+    });
+    const IMG_COL = {F:5, A:7, B:8, C:9, D:10}; // 0-based 欄位索引：題目圖片=F(5)，選項圖片A–D=H–K(7–10)
+    let missingImages = 0, embeddedImages = 0;
+    for(let i=0;i<bank.length;i++){
+      const q = bank[i];
+      const rowIdx = i + 1; // 0-based（第 0 列是標題）
+      const row = ws.addRow([
+        q.no || '',
+        q.sourceFile || '',
+        q.category || '',
+        q.type==='multi' ? '複選' : '單選',
+        q.questionText || '',
+        '',
+        quizOptionsTextToRaw(q),
+        '','','','',
+        quizAnswerLettersToText(q),
+        q.explanation || '',
+      ]);
+      row.eachCell({includeEmpty:true}, c=>{ c.alignment = {vertical:'top', wrapText:true}; });
+      const imgRefs = [
+        [IMG_COL.F, q.questionImage],
+        [IMG_COL.A, q.optionImages && q.optionImages.A],
+        [IMG_COL.B, q.optionImages && q.optionImages.B],
+        [IMG_COL.C, q.optionImages && q.optionImages.C],
+        [IMG_COL.D, q.optionImages && q.optionImages.D],
+      ].filter(x=>x[1]);
+      let hasImg = false;
+      for(const [colIdx, attId] of imgRefs){
+        const dataUrl = cache[attId];
+        const conv = dataUrlToExcelImage(dataUrl);
+        if(!conv){ missingImages++; continue; }
+        const size = await loadImageNaturalSize(dataUrl);
+        const box = 100; // 儲存格內圖片最大邊長（像素）
+        const scale = Math.min(box/size.w, box/size.h, 1);
+        const w = Math.max(1, Math.round(size.w*scale)), h = Math.max(1, Math.round(size.h*scale));
+        const imageId = wb.addImage({base64: conv.base64, extension: conv.extension});
+        ws.addImage(imageId, {tl:{col:colIdx, row:rowIdx}, ext:{width:w, height:h}, editAs:'oneCell'});
+        hasImg = true; embeddedImages++;
+      }
+      // 列高：有圖片至少 90 點；否則依文字多寡估算
+      const lines = Math.max(
+        estimateCellLines(q.questionText, widths[4]),
+        estimateCellLines(quizOptionsTextToRaw(q), widths[6]),
+        estimateCellLines(q.explanation, widths[12])
+      );
+      const textHeight = Math.min(409, Math.max(30, lines*15 + 6));
+      row.height = hasImg ? Math.min(409, Math.max(90, textHeight)) : textHeight;
+    }
+    const buf = await wb.xlsx.writeBuffer();
+    const blob = new Blob([buf], {type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
+    const now = new Date();
+    const pad = n=>String(n).padStart(2,'0');
+    const stamp = `${now.getFullYear()}${pad(now.getMonth()+1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}`;
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `題庫匯出_${stamp}.xlsx`;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(()=>URL.revokeObjectURL(a.href), 10000);
+    showToast(`已下載題庫共 ${bank.length} 題，內含 ${embeddedImages} 張圖片` + (missingImages ? `（另有 ${missingImages} 張圖片讀取失敗，未放入檔案）` : ''));
+  }catch(e){
+    console.error('題庫匯出失敗', e);
+    showToast('匯出失敗：' + (e && e.message ? e.message : '請檢查網路連線後再試一次'));
+  }
 }
 async function onQuizFileChange(input){
   const file = input.files && input.files[0];
@@ -4164,7 +4244,7 @@ function renderAdminQuiz(){
   <div class="subhead">下載目前最新題庫</div>
   <div class="card">
     <p style="font-size:12px;color:var(--ink-soft);margin:0 0 10px;line-height:1.6;">
-      可將系統目前最新的題庫資料（含後台編輯過、尚未存回 Excel 的內容）下載成 Excel 檔，方便備份或離線查看。下載檔為文字內容，題目與選項的圖片不會包含在檔案中，需至系統內查看。
+      可將系統目前最新的題庫資料（含後台編輯過、尚未存回 Excel 的內容）下載成 Excel 檔，方便備份或離線查看。下載檔會連同題目與選項圖片一起放進 Excel，可直接再匯入回系統。
     </p>
     <button class="btn btn-outline btn-block" ${!totalQ?'disabled':''} onclick="exportQuizBankExcel()">📤 下載目前題庫（Excel）</button>
   </div>
