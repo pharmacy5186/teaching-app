@@ -2405,8 +2405,55 @@ function diagLog(msg){
 }
 const DB_READ_MAX_ATTEMPTS = 3;     // 第一次 + 自動重試 2 次
 function sleepMs(ms){ return new Promise(r=>setTimeout(r, ms)); }
+// ---- 用一般網頁請求（REST）讀主資料庫 ----
+// Firestore 程式庫的連線偶爾會卡 10 秒才放棄；一般 HTTPS 請求實測穩定（約 0.1~0.3 秒）。
+// 只用來「讀取」，儲存仍走原本的 SDK。任何異常（逾時、非 200、遇到無法轉換的資料類型）都會丟出錯誤，由呼叫端退回 SDK 讀取。
+const REST_READ_TIMEOUT_MS = 6000;
+function firestoreRestValueToJs(v){
+  if('stringValue' in v) return v.stringValue;
+  if('integerValue' in v) return Number(v.integerValue);
+  if('doubleValue' in v) return Number(v.doubleValue);
+  if('booleanValue' in v) return v.booleanValue;
+  if('nullValue' in v) return null;
+  if('mapValue' in v){
+    const o = {};
+    const f = v.mapValue.fields || {};
+    for(const k of Object.keys(f)) o[k] = firestoreRestValueToJs(f[k]);
+    return o;
+  }
+  if('arrayValue' in v) return (v.arrayValue.values || []).map(firestoreRestValueToJs);
+  throw new Error('REST 資料含無法轉換的類型：' + Object.keys(v)[0]);
+}
+async function readMainDocViaRest(){
+  const url = 'https://firestore.googleapis.com/v1/projects/' + encodeURIComponent(firebaseConfig.projectId) +
+    '/databases/(default)/documents/' + FIRESTORE_DOC_PATH.map(encodeURIComponent).join('/') +
+    '?key=' + encodeURIComponent(firebaseConfig.apiKey);
+  const ac = new AbortController();
+  const timer = setTimeout(()=>ac.abort(), REST_READ_TIMEOUT_MS);
+  try{
+    const res = await fetch(url, { signal: ac.signal });
+    // 只接受 200。404（文件不存在）也不採信，交給 SDK 流程判斷，避免誤判成「第一次安裝」而寫入示範資料
+    if(res.status !== 200) throw new Error('REST 回應狀態 ' + res.status);
+    const json = await res.json();
+    const out = {};
+    const fields = json.fields || {};
+    for(const k of Object.keys(fields)) out[k] = firestoreRestValueToJs(fields[k]);
+    return { exists:true, data:()=>out };
+  }finally{
+    clearTimeout(timer);
+  }
+}
 // 只有「讀取」這一步會重試；讀到之後的處理流程不重試
 async function readMainDocWithRetry(){
+  // 先走 REST（快且穩）；失敗才退回原本的 SDK 讀取與重試流程
+  try{
+    diagLog('讀取主資料庫：REST 開始');
+    const d = await readMainDocViaRest();
+    diagLog('讀取主資料庫：REST 成功');
+    return d;
+  }catch(e){
+    diagLog(`讀取主資料庫：REST 失敗，改用 SDK → ${e && e.message ? e.message : e}`);
+  }
   let lastErr = null;
   for(let attempt=1; attempt<=DB_READ_MAX_ATTEMPTS; attempt++){
     try{
