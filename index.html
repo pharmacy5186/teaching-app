@@ -2582,6 +2582,40 @@ async function queryByTrainee(collectionName, traineeName){
   return snap.docs.map(d=>{ const data = d.data(); if(!data.id) data.id = d.id; return data; });
 }
 function sortAttemptsNewestFirst(arr){ return arr.slice().sort((a,b)=>(b.ts||0)-(a.ts||0)); }
+
+/* ---- 預習／複習記錄：學員開啟站別頁、查看工作項目詳情、查看案例提醒時各記一筆 ----
+   同一人、同一動作、同一站別（或項目）10 分鐘內只記一次；記錄失敗不會打擾學員。 */
+const VIEW_LOGS_COLLECTION = 'pharmacy_teaching_app_view_logs';
+const OFFHOURS_START_MIN = 7*60+30;   // 平日 07:30 之前
+const OFFHOURS_END_MIN   = 17*60+30;  // 平日 17:30 之後
+const VIEW_LOG_THROTTLE_MS = 10*60*1000;
+const __viewLogLast = {};
+// 非上班／教學時間：週六、週日，或平日 07:30–17:30 以外
+function isOffHoursTs(ts){
+  const d = new Date(ts);
+  const dow = d.getDay();
+  if(dow===0 || dow===6) return true;
+  const m = d.getHours()*60 + d.getMinutes();
+  return m < OFFHOURS_START_MIN || m >= OFFHOURS_END_MIN;
+}
+function logViewEvent(type, stationId, itemId){
+  try{
+    if(!firebaseReady) return;
+    const user = currentUser();
+    if(!user || !isTraineeRole(user.role)) return;
+    const key = type+'|'+stationId+'|'+(itemId||'');
+    const now = Date.now();
+    if(__viewLogLast[key] && now - __viewLogLast[key] < VIEW_LOG_THROTTLE_MS) return;
+    __viewLogLast[key] = now;
+    const st = findStation(stationId);
+    const id = uid('vw');
+    firestoreDb.collection(VIEW_LOGS_COLLECTION).doc(id).set(sanitizeForFirestore({
+      id, traineeName: user.name, type, stationId,
+      stationName: st ? st.name : '', itemId: itemId || '',
+      ts: now, date: todayStr(),
+    })).catch(e=>console.error('預習記錄儲存失敗', e));
+  }catch(e){ console.error('預習記錄失敗', e); }
+}
 // 學員首頁「我的考核紀錄」：背景讀取，讀完再更新畫面
 async function loadMyQuizAttempts(name){
   if(S.myAttemptsFor !== name){ S.myAttempts = null; }
@@ -3795,6 +3829,7 @@ async function openStation(id, traineeName, dateStr){
   S.view='station-detail';
   S.stationMatchLoading = true;
   S.stationMentorMatch = null;
+  logViewEvent('station', id);
   renderApp(); window.scrollTo(0,0);
   S.stationMentorMatch = await findAnyStaffForStation(id, S.stationViewDate);
   S.stationMatchLoading = false;
@@ -3804,6 +3839,8 @@ async function openItemModal(stationId, itemId){
   const st = findStation(stationId);
   const item = st.categories.flatMap(c=>c.items).find(i=>i.id===itemId);
   if(!item || !item.detail) return;
+  const isIncidentItem = st.categories.some(c=>c.isIncident && c.items.some(i=>i.id===itemId));
+  logViewEvent(isIncidentItem ? 'incident' : 'item', stationId, itemId);
   const d = item.detail;
   const sections = migrateDetailToSections(d);
   openModal(`
@@ -4684,13 +4721,15 @@ function renderAdmin(){
       <button class="${S.adminTab==='quiz'?'active':''}" onclick="setAdminTab('quiz')">題庫管理</button>
       <button class="${S.adminTab==='pp'?'active':''}" onclick="setAdminTab('pp')">P&amp;P</button>
       <button class="${S.adminTab==='history'?'active':''}" onclick="setAdminTab('history')">學習歷程</button>
+      <button class="${S.adminTab==='analytics'?'active':''}" onclick="setAdminTab('analytics')">教學數據</button>
       <button class="${S.adminTab==='backup'?'active':''}" onclick="setAdminTab('backup')">資料備份</button>
     </div>
-    ${S.adminTab==='stations' ? renderAdminStations() : S.adminTab==='people' ? renderAdminPeople() : S.adminTab==='quiz' ? renderAdminQuiz() : S.adminTab==='pp' ? renderAdminPP() : S.adminTab==='history' ? renderAdminHistory() : renderAdminBackup()}
+    ${S.adminTab==='stations' ? renderAdminStations() : S.adminTab==='people' ? renderAdminPeople() : S.adminTab==='quiz' ? renderAdminQuiz() : S.adminTab==='pp' ? renderAdminPP() : S.adminTab==='history' ? renderAdminHistory() : S.adminTab==='analytics' ? renderAdminAnalytics() : renderAdminBackup()}
   </div>`;
 }
 async function setAdminTab(t){
   S.adminTab=t; S.editingStation=null;
+  if(t==='analytics'){ loadAnalytics(); return; }
   if(t==='backup'){
     S.backupLoading = true;
     S.backupList = null;
@@ -5510,6 +5549,188 @@ function renderTraineeQuizAttemptsAdmin(name){
   const attempts = hd.attempts || [];
   if(!attempts.length) return '<p style="font-size:12.5px;color:var(--ink-soft);">尚無考核紀錄。</p>';
   return attempts.map(renderQuizAttemptRow).join('');
+}
+
+/* =========================================================
+   ADMIN — 教學數據（完成率／學習天數／預習與複習／小考成長）
+   進入頁籤時一次讀取所有學員的紀錄；完成率直接用目前的勾選進度計算。
+   ========================================================= */
+async function loadAnalytics(){
+  const keep = S.analytics && S.analytics.selected;
+  S.analytics = {loading:true, error:false, data:{}, selected:keep||null};
+  renderApp();
+  const trainees = DB.employees.filter(e=>isTraineeRole(e.role));
+  let result;
+  try{
+    const entries = await Promise.all(trainees.map(async e=>{
+      const [logs, views, attempts] = await Promise.all([
+        queryByTrainee(LOGS_COLLECTION, e.name),
+        queryByTrainee(VIEW_LOGS_COLLECTION, e.name),
+        queryByTrainee(QUIZ_ATTEMPTS_COLLECTION, e.name),
+      ]);
+      return [e.name, {logs, views, attempts}];
+    }));
+    const data = {}; entries.forEach(([n,d])=>{ data[n]=d; });
+    result = {loading:false, error:false, data, selected:keep||null};
+  }catch(e){
+    console.error('讀取教學數據失敗', e);
+    result = {loading:false, error:true, data:{}, selected:keep||null};
+  }
+  S.analytics = result;
+  if(S.adminTab==='analytics') renderApp();
+}
+function setAnalyticsTrainee(name){
+  if(!S.analytics) return;
+  S.analytics.selected = name || null;
+  renderApp(); window.scrollTo(0,0);
+}
+function anaDayStart(ts){ const d=new Date(ts); return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime(); }
+// 含起訖日（當天完成 = 1 天）
+function anaDaysBetween(t1, t2){ return Math.round((anaDayStart(t2)-anaDayStart(t1))/86400000) + 1; }
+function anaFmtTs(ts){
+  const d = new Date(ts); const p = n=>String(n).padStart(2,'0');
+  return `${p(d.getMonth()+1)}/${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+// 單一站別的學習時間：起點 = 第一次勾選；終點 = 最後一個項目被勾完的那一刻
+function analyticsStationDuration(st, name, logs){
+  const ids = new Set(st.categories.filter(c=>!c.isIncident).flatMap(c=>c.items.map(i=>i.id)));
+  if(!ids.size) return null;
+  const mine = (logs||[]).filter(l=>l.stationId===st.id && ids.has(l.itemId) && l.timestamp)
+    .sort((a,b)=>String(a.timestamp).localeCompare(String(b.timestamp)));
+  const firstChecked = mine.find(l=>l.checked);
+  if(!firstChecked) return null;
+  const first = new Date(firstChecked.timestamp).getTime();
+  const set = new Set(); let end = null;
+  mine.forEach(l=>{
+    if(l.checked) set.add(l.itemId); else set.delete(l.itemId);
+    if(end===null && set.size===ids.size) end = new Date(l.timestamp).getTime();
+  });
+  const complete = percentDone(st, name)===100;
+  if(complete){
+    if(end===null){ const last = mine.filter(l=>l.checked).pop(); end = new Date(last.timestamp).getTime(); }
+    return {first, end, complete:true, days: anaDaysBetween(first, end)};
+  }
+  return {first, end:null, complete:false, days: anaDaysBetween(first, Date.now())};
+}
+function analyticsTraineeSummary(name){
+  const data = (S.analytics && S.analytics.data[name]) || {logs:[], views:[], attempts:[]};
+  const stations = DB.stations.filter(st=>totalItems(st)>0).map(st=>{
+    const total = totalItems(st), done = checkedCount(st, name);
+    const dur = done>0 ? analyticsStationDuration(st, name, data.logs) : null;
+    return {st, total, done, pct: Math.round(done/total*100), dur};
+  });
+  const started = stations.filter(s=>s.done>0);
+  const finished = started.filter(s=>s.done===s.total);
+  const durDays = finished.map(s=>s.dur && s.dur.complete ? s.dur.days : null).filter(x=>x!=null);
+  const avgDays = durDays.length ? Math.round(durDays.reduce((a,b)=>a+b,0)/durDays.length*10)/10 : null;
+  const views = data.views || [];
+  const offViews = views.filter(v=>isOffHoursTs(v.ts));
+  const attempts = (data.attempts||[]).slice().sort((a,b)=>(a.ts||0)-(b.ts||0));
+  return {data, stations, started, finished, avgDays, views, offViews, attempts};
+}
+function anaQuizTrend(attempts){
+  const groups = {};
+  attempts.forEach(a=>{ const k = a.stationId || a.stationName; (groups[k] = groups[k] || {name:a.stationName, list:[]}).list.push(a); });
+  return Object.values(groups).map(g=>{
+    const pcts = g.list.map(a=>({date:a.date, pct: a.total ? Math.round(a.score/a.total*100) : 0, label:`${a.score}/${a.total}`}));
+    return {name:g.name, pcts, diff: pcts.length>1 ? pcts[pcts.length-1].pct - pcts[0].pct : null};
+  });
+}
+function anaBar(pct){
+  return `<div style="height:6px;background:var(--line);border-radius:4px;overflow:hidden;margin-top:4px;"><div style="width:${pct}%;height:100%;background:var(--primary);"></div></div>`;
+}
+function renderAdminAnalytics(){
+  const trainees = DB.employees.filter(e=>isTraineeRole(e.role));
+  if(!trainees.length) return `<p style="font-size:12.5px;color:var(--ink-soft);">目前沒有設定任何學員，請先到「學員與人員」新增。</p>`;
+  const A = S.analytics;
+  if(!A || A.loading) return `<p style="font-size:12.5px;color:var(--ink-soft);">讀取所有學員的紀錄中…</p>`;
+  if(A.error) return `<div class="empty-note" style="background:var(--danger-tint);color:var(--danger);">讀取教學數據失敗，請檢查網路連線。<br><button class="btn btn-outline btn-sm" style="margin-top:8px;" onclick="loadAnalytics()">重新讀取</button></div>`;
+  if(A.selected && trainees.some(t=>t.name===A.selected)) return renderAnalyticsDetail(A.selected);
+  return renderAnalyticsOverview(trainees);
+}
+function renderAnalyticsOverview(trainees){
+  const rows = trainees.map(t=>{
+    const s = analyticsTraineeSummary(t.name);
+    const lastQ = s.attempts.length ? s.attempts[s.attempts.length-1] : null;
+    const lastQtxt = lastQ ? `${Math.round(lastQ.score/lastQ.total*100)}%（${escAttr(lastQ.date)}）` : '—';
+    return `
+      <tr onclick="setAnalyticsTrainee('${escAttr(t.name)}')" style="cursor:pointer;">
+        <td><b>${escAttr(t.name)}</b></td>
+        <td>${s.started.length}</td>
+        <td>${s.finished.length}</td>
+        <td>${s.avgDays!=null ? s.avgDays+' 天' : '—'}</td>
+        <td>${s.offViews.length}</td>
+        <td>${lastQtxt}</td>
+      </tr>`;
+  }).join('');
+  return `
+    <div class="subhead">學員教學數據總表</div>
+    <p style="font-size:11.5px;color:var(--ink-soft);margin:0 0 8px;line-height:1.6;">點選學員可查看各站別完成率、學習天數、預習與複習次數、小考分數走勢。「非上班時間」指平日 07:30–17:30 以外與週六、週日。預習記錄從此功能上線後才開始累積。</p>
+    <button class="btn btn-ghost btn-sm" style="margin-bottom:8px;" onclick="loadAnalytics()">🔄 重新讀取</button>
+    <div style="overflow-x:auto;">
+      <table class="sched-table">
+        <thead><tr><th>學員</th><th>已開始站別</th><th>已完成站別</th><th>平均完成天數</th><th>非上班時間開啟（次）</th><th>最近小考</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
+}
+function renderAnalyticsDetail(name){
+  const s = analyticsTraineeSummary(name);
+  const stationRows = s.stations.map(x=>{
+    const cats = x.st.categories.filter(c=>!c.isIncident && c.items.length);
+    const arr = getChecked(x.st.id, name);
+    const catLine = x.done>0 ? cats.map(c=>`${escAttr(c.title)} ${c.items.filter(i=>arr.includes(i.id)).length}/${c.items.length}`).join('　·　') : '';
+    let durTxt = '尚未開始';
+    if(x.dur){
+      durTxt = x.dur.complete
+        ? `首次勾選 ${anaFmtTs(x.dur.first)} → 完成 ${anaFmtTs(x.dur.end)}，共 <b>${x.dur.days}</b> 天`
+        : `首次勾選 ${anaFmtTs(x.dur.first)}，學習中（至今 ${x.dur.days} 天）`;
+    }else if(x.done>0){ durTxt = '已有進度，但查無勾選時間紀錄'; }
+    return `
+      <div class="admin-item-row" style="display:block;">
+        <div class="t">${x.st.emoji} <b>${escAttr(x.st.name)}</b>（${escAttr(x.st.code)}） · ${x.done}/${x.total} 項（${x.pct}%）${x.done===x.total?' <span class="pill-tag tag-mint">已完成</span>':''}</div>
+        ${anaBar(x.pct)}
+        ${catLine ? `<div style="font-size:11px;color:var(--ink-soft);margin-top:4px;">${catLine}</div>` : ''}
+        <div style="font-size:11.5px;color:var(--ink-soft);margin-top:3px;">${durTxt}</div>
+      </div>`;
+  }).join('');
+
+  const typeLabel = {station:'開啟站別教學頁', item:'查看工作項目詳情', incident:'查看案例提醒'};
+  const cnt = {station:0, item:0, incident:0};
+  s.offViews.forEach(v=>{ if(cnt[v.type]!=null) cnt[v.type]++; });
+  const offDays = new Set(s.offViews.map(v=>v.date)).size;
+  const recent = s.offViews.slice().sort((a,b)=>b.ts-a.ts).slice(0,10);
+  const recentRows = recent.map(v=>`<tr><td>${anaFmtTs(v.ts)}</td><td>${typeLabel[v.type]||escAttr(v.type)}</td><td>${escAttr(v.stationName)}</td></tr>`).join('');
+  const viewHtml = `
+    <div class="admin-item-row" style="display:block;">
+      <div class="t">全部開啟 <b>${s.views.length}</b> 次，其中非上班時間 <b>${s.offViews.length}</b> 次（分布在 <b>${offDays}</b> 天）</div>
+      <div style="font-size:11.5px;color:var(--ink-soft);margin-top:4px;">非上班時間：${typeLabel.station} ${cnt.station} 次 ／ ${typeLabel.item} ${cnt.item} 次 ／ ${typeLabel.incident} ${cnt.incident} 次</div>
+    </div>
+    ${recent.length ? `<div style="overflow-x:auto;"><table class="sched-table"><thead><tr><th>時間</th><th>動作</th><th>站別</th></tr></thead><tbody>${recentRows}</tbody></table></div>` : '<p style="font-size:12px;color:var(--ink-soft);">尚無非上班時間的開啟紀錄。</p>'}`;
+
+  const trend = anaQuizTrend(s.attempts);
+  const trendHtml = trend.length ? trend.map(t=>{
+    const tag = t.diff==null ? '<span class="pill-tag tag-sky">僅 1 次，尚無法比較</span>'
+      : t.diff>0 ? `<span class="pill-tag tag-mint">進步 +${t.diff}%</span>`
+      : t.diff<0 ? `<span class="pill-tag tag-peach">退步 ${t.diff}%</span>`
+      : '<span class="pill-tag tag-sky">持平</span>';
+    return `
+      <div class="admin-item-row" style="display:block;">
+        <div class="t"><b>${escAttr(t.name)}</b>（共 ${t.pcts.length} 次） ${tag}</div>
+        <div style="font-size:11.5px;color:var(--ink-soft);margin-top:4px;line-height:1.7;">${t.pcts.map(p=>`${escAttr(String(p.date).slice(5))} ${p.pct}%（${p.label}）`).join(' → ')}</div>
+      </div>`;
+  }).join('') : '<p style="font-size:12px;color:var(--ink-soft);">這位學員尚無小考紀錄。</p>';
+
+  return `
+    <button class="back-btn" style="margin-bottom:10px;" onclick="setAnalyticsTrainee(null)">← 回總表</button>
+    <div class="subhead">${escAttr(name)} 的教學數據</div>
+    <div class="subhead" style="font-size:12px;">1. 項目完成率與學習天數</div>
+    <p style="font-size:11px;color:var(--ink-soft);margin:0 0 6px;">學習天數 = 第一次勾選到最後一項勾完（含起訖日，當天完成算 1 天）；尚未完成者顯示至今天數。</p>
+    ${stationRows || '<p style="font-size:12px;color:var(--ink-soft);">尚無站別資料。</p>'}
+    <div class="subhead" style="font-size:12px;margin-top:16px;">2. 預習與複習（非上班時間登入）</div>
+    ${viewHtml}
+    <div class="subhead" style="font-size:12px;margin-top:16px;">3. 小考分數走勢（同一站別）</div>
+    ${trendHtml}`;
 }
 
 async function addEmployee(){
