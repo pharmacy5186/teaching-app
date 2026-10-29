@@ -3923,11 +3923,6 @@ function getCategoryStationIds(category){
 function stationQuizCategories(stationId){
   return quizCategories().filter(cat=>isCategoryOnStation(cat, stationId));
 }
-function isCategoryCustomized(category){
-  const m = getCategoryMapEntry(category);
-  if(!m) return false;
-  return (m.stationIds||[]).some(id=>!isDefaultCategoryStation(category,id)) || (m.excludeStationIds||[]).length>0;
-}
 function toggleCategoryStation(category, stationId){
   if(!DB.quizCategoryMap) DB.quizCategoryMap=[];
   let m = getCategoryMapEntry(category);
@@ -3943,11 +3938,6 @@ function toggleCategoryStation(category, stationId){
     rm(m.excludeStationIds);
     if(!isDefaultCategoryStation(category, stationId) && !m.stationIds.includes(stationId)) m.stationIds.push(stationId);
   }
-  persist(); renderApp();
-}
-function resetCategoryToDefault(category){
-  const m = getCategoryMapEntry(category);
-  if(m){ m.stationIds=[]; m.excludeStationIds=[]; }
   persist(); renderApp();
 }
 async function prefetchQuizImages(questions){
@@ -4404,10 +4394,9 @@ function renderAdminQuiz(){
 
   <div class="subhead">分類/班別 對應站別</div>
   <div class="card">
-    <p style="font-size:11.5px;color:var(--ink-soft);margin:0 0 10px;">系統已依班表工作表名稱帶入預設對應（例如磨粉台 = 磨粉、V8、CK；A班、P班與假日班 = 全部分類），學員在某站別點選「站別考核」時，會從對應的分類中隨機抽題。如需調整，可直接點選下方按鈕開關；深色 = 會出題。調整過的分類可按「還原預設」。</p>
     ${cats.length ? cats.map(cat=>`
       <div style="margin-bottom:14px;">
-        <div style="font-weight:700;font-size:12.5px;margin-bottom:6px;">「${escAttr(cat)}」${isCategoryCustomized(cat)?` <span class="pill-tag tag-peach">已手動調整</span> <button class="mini-edit" onclick="resetCategoryToDefault('${escAttr(cat)}')">還原預設</button>`:''}</div>
+        <div style="font-weight:700;font-size:12.5px;margin-bottom:6px;">「${escAttr(cat)}」</div>
         <div style="display:flex;flex-wrap:wrap;gap:6px;">
           ${DB.stations.map(st=>{
             const on = isCategoryOnStation(cat, st.id);
