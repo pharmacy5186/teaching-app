@@ -3868,19 +3868,86 @@ function quizCategories(){
   (DB.quizBank||[]).forEach(q=>{ if(q.category) set.add(q.category); });
   return Array.from(set).sort();
 }
+/* ---- 站別 ↔ 題庫分類 預設對應（依 Excel 工作表名稱：括號內即可抽的分類；無括號的班別抽全部）----
+   後台仍可手動微調：手動勾選 = 額外加入；取消預設項目 = 記在 excludeStationIds。 */
+const QUIZ_ALL = '*';
+const QUIZ_STATION_DEFAULTS = {
+  '小黃': ['調劑','磨粉','CK','發藥','UD'],
+  '小藍': ['調劑','UD'],
+  '小紅': ['調劑'],
+  '小綠': ['調劑'],
+  '中班': ['調劑','磨粉','CK','發藥','UD'],
+  '磨粉': ['磨粉','V8','CK'],
+  'V8':   ['V8'],
+  'CK':   ['CK','發藥'],
+  '發藥': ['CK','發藥'],
+  'B7.5': ['CK','發藥'],
+  'B8':   ['調劑','CK'],
+  'A班':  QUIZ_ALL,   // 小夜
+  'P班':  QUIZ_ALL,   // 大夜
+};
+function normQuizCat(c){
+  let s = String(c==null?'':c).replace(/\s/g,'').toUpperCase();
+  if(s==='V') s = 'V8';
+  return s;
+}
+function normStationName(n){
+  return String(n==null?'':n).replace(/\s/g,'').replace(/台$/,'').toUpperCase();
+}
+// 回傳該站別預設可抽的分類：QUIZ_ALL（全部）或分類陣列（已正規化）
+function defaultQuizCatsForStation(st){
+  if(!st) return [];
+  if(st.dayType==='sat' || st.dayType==='sun') return QUIZ_ALL; // 假日班
+  const key = Object.keys(QUIZ_STATION_DEFAULTS).find(k=>normStationName(k)===normStationName(st.name));
+  if(!key) return [];
+  const v = QUIZ_STATION_DEFAULTS[key];
+  return v===QUIZ_ALL ? QUIZ_ALL : v.map(normQuizCat);
+}
+function isDefaultCategoryStation(category, stationId){
+  const def = defaultQuizCatsForStation(findStation(stationId));
+  return def===QUIZ_ALL || (Array.isArray(def) && def.includes(normQuizCat(category)));
+}
+function getCategoryMapEntry(category){
+  return (DB.quizCategoryMap||[]).find(x=>x.category===category);
+}
+// 實際是否啟用：手動勾選 或（預設包含 且 未被手動取消）
+function isCategoryOnStation(category, stationId){
+  const m = getCategoryMapEntry(category);
+  if(m && (m.stationIds||[]).includes(stationId)) return true;
+  if(m && (m.excludeStationIds||[]).includes(stationId)) return false;
+  return isDefaultCategoryStation(category, stationId);
+}
 function getCategoryStationIds(category){
-  const m = (DB.quizCategoryMap||[]).find(x=>x.category===category);
-  return m ? m.stationIds : [];
+  return (DB.stations||[]).filter(st=>isCategoryOnStation(category, st.id)).map(st=>st.id);
 }
 function stationQuizCategories(stationId){
-  return (DB.quizCategoryMap||[]).filter(m=>(m.stationIds||[]).includes(stationId)).map(m=>m.category);
+  return quizCategories().filter(cat=>isCategoryOnStation(cat, stationId));
+}
+function isCategoryCustomized(category){
+  const m = getCategoryMapEntry(category);
+  if(!m) return false;
+  return (m.stationIds||[]).some(id=>!isDefaultCategoryStation(category,id)) || (m.excludeStationIds||[]).length>0;
 }
 function toggleCategoryStation(category, stationId){
   if(!DB.quizCategoryMap) DB.quizCategoryMap=[];
-  let m = DB.quizCategoryMap.find(x=>x.category===category);
-  if(!m){ m={category, stationIds:[]}; DB.quizCategoryMap.push(m); }
-  const idx = m.stationIds.indexOf(stationId);
-  if(idx>-1) m.stationIds.splice(idx,1); else m.stationIds.push(stationId);
+  let m = getCategoryMapEntry(category);
+  if(!m){ m={category, stationIds:[], excludeStationIds:[]}; DB.quizCategoryMap.push(m); }
+  if(!m.stationIds) m.stationIds=[];
+  if(!m.excludeStationIds) m.excludeStationIds=[];
+  const wasOn = isCategoryOnStation(category, stationId);
+  const rm = (arr)=>{ const i=arr.indexOf(stationId); if(i>-1) arr.splice(i,1); };
+  if(wasOn){
+    rm(m.stationIds);
+    if(isDefaultCategoryStation(category, stationId) && !m.excludeStationIds.includes(stationId)) m.excludeStationIds.push(stationId);
+  }else{
+    rm(m.excludeStationIds);
+    if(!isDefaultCategoryStation(category, stationId) && !m.stationIds.includes(stationId)) m.stationIds.push(stationId);
+  }
+  persist(); renderApp();
+}
+function resetCategoryToDefault(category){
+  const m = getCategoryMapEntry(category);
+  if(m){ m.stationIds=[]; m.excludeStationIds=[]; }
   persist(); renderApp();
 }
 async function prefetchQuizImages(questions){
@@ -4337,13 +4404,13 @@ function renderAdminQuiz(){
 
   <div class="subhead">分類/班別 對應站別</div>
   <div class="card">
-    <p style="font-size:11.5px;color:var(--ink-soft);margin:0 0 10px;">請勾選每個題庫分類要出現在哪些站別的考核中（一個分類可以對應多個站別；學員在某站別點選「站別考核」時，會從對應的分類中隨機抽題）。</p>
+    <p style="font-size:11.5px;color:var(--ink-soft);margin:0 0 10px;">系統已依班表工作表名稱帶入預設對應（例如磨粉台 = 磨粉、V8、CK；A班、P班與假日班 = 全部分類），學員在某站別點選「站別考核」時，會從對應的分類中隨機抽題。如需調整，可直接點選下方按鈕開關；深色 = 會出題。調整過的分類可按「還原預設」。</p>
     ${cats.length ? cats.map(cat=>`
       <div style="margin-bottom:14px;">
-        <div style="font-weight:700;font-size:12.5px;margin-bottom:6px;">「${escAttr(cat)}」</div>
+        <div style="font-weight:700;font-size:12.5px;margin-bottom:6px;">「${escAttr(cat)}」${isCategoryCustomized(cat)?` <span class="pill-tag tag-peach">已手動調整</span> <button class="mini-edit" onclick="resetCategoryToDefault('${escAttr(cat)}')">還原預設</button>`:''}</div>
         <div style="display:flex;flex-wrap:wrap;gap:6px;">
           ${DB.stations.map(st=>{
-            const on = getCategoryStationIds(cat).includes(st.id);
+            const on = isCategoryOnStation(cat, st.id);
             return `<button class="btn btn-sm ${on?'btn-primary':'btn-ghost'}" onclick="toggleCategoryStation('${escAttr(cat)}','${st.id}')">${st.emoji} ${st.name}</button>`;
           }).join('')}
         </div>
