@@ -135,6 +135,7 @@ p.page-sub{margin:0 0 16px;color:var(--ink-soft);font-size:13px;}
 .btn-sm{padding:7px 12px;font-size:12px;min-height:34px;}
 .pill-tag{display:inline-block;padding:3px 10px;border-radius:100px;font-size:11px;font-weight:700;letter-spacing:.02em;}
 .tag-mint{background:var(--mint);color:var(--mint-ink);}
+.tag-lilac{background:#ECE6F7;color:#4B3A7A;}
 .tag-sky{background:var(--sky);color:var(--sky-ink);}
 .tag-lav{background:var(--lav);color:var(--lav-ink);}
 .tag-peach{background:var(--peach);color:var(--peach-ink);}
@@ -2687,7 +2688,7 @@ async function migrateLegacyLogsToCollections(){
     delete DB.learningLog; delete DB.quizAttempts;
     if(baseDB){ delete baseDB.learningLog; delete baseDB.quizAttempts; }
     console.info(`學習紀錄遷移完成：${legacyLogs.length} 筆學習紀錄、${legacyAttempts.length} 筆考核紀錄已搬到獨立集合。`);
-    if(S.view === 'today' && currentUser() && currentUser().role === 'trainee') loadMyQuizAttempts(currentUser().name);
+    if(S.view === 'today' && currentUser() && isTraineeRole(currentUser().role)) loadMyQuizAttempts(currentUser().name);
     if(S.historyTraineeFilter) loadHistoryData(S.historyTraineeFilter);
   }catch(e){
     console.error('學習紀錄遷移未完成（主資料庫舊資料原封不動，下次開啟會再試一次）', e);
@@ -2891,7 +2892,7 @@ async function computeAutoSchedule(employeeName, date){
   return {station, mentor, code};
 }
 async function findTraineesMentoredBy(staffName, date){
-  const trainees = DB.employees.filter(e=>e.role==='trainee');
+  const trainees = DB.employees.filter(e=>isTraineeRole(e.role));
   const out = [];
   for(const t of trainees){
     const auto = await computeAutoSchedule(t.name, date);
@@ -2909,7 +2910,7 @@ function percentDone(station, traineeName){ if(!traineeName) return 0; const t=t
 async function toggleItem(stationId, itemId, traineeName){
   if(!traineeName){ showToast('請先選擇要記錄進度的學員'); return; }
   const user = currentUser();
-  if(!(user && user.role==='trainee' && user.name===traineeName)){
+  if(!(user && isTraineeRole(user.role) && user.name===traineeName)){
     showToast('只有學員本人登入後才能勾選檢核項目');
     return;
   }
@@ -3012,7 +3013,7 @@ function showToast(msg){
    ========================================================= */
 function renderToday(){
   const user = currentUser();
-  if(user && user.role==='trainee') return renderTodayTrainee(user);
+  if(user && isTraineeRole(user.role)) return renderTodayTrainee(user);
   if(user && user.role==='staff') return renderTodayStaff(user);
   return renderTodayGeneric();
 }
@@ -3020,7 +3021,7 @@ async function refreshTodayData(){
   const user = currentUser();
   if(!user) return;
   const t = todayStr(), tmr = tomorrowStr();
-  if(user.role==='trainee'){
+  if(isTraineeRole(user.role)){
     loadMyQuizAttempts(user.name); // 不等它：考核紀錄在背景讀取，讀完再更新那一小塊畫面
     const [a, b] = await Promise.all([computeAutoSchedule(user.name, t), computeAutoSchedule(user.name, tmr)]);
     S.todayAuto = a; S.todayAutoTmr = b;
@@ -3169,7 +3170,7 @@ const DAYTYPE_LABEL = {weekday:'平日班', sat:'週六班', sun:'週日班'};
 function renderStationList(){
   const filtered = DB.stations.filter(st=>(st.dayType||'weekday')===S.stationsTab);
   const user = currentUser();
-  const traineeCtx = (user && user.role==='trainee') ? user.name : null;
+  const traineeCtx = (user && isTraineeRole(user.role)) ? user.name : null;
   const rows = filtered.map(st=>{
     const pct = percentDone(st, traineeCtx);
     const c = STATION_COLORS.find(c=>c.id===st.color) || STATION_COLORS[0];
@@ -3233,7 +3234,7 @@ function renderStationDetail(){
   const shiftLabel = S.stationMatchLoading ? '查詢班表中…' : (todayMatch ? `${dateLabel}班別（${todayMatch.code}）` : `無班表（${viewDate}）`);
   const user = currentUser();
   const isLocked = !!(traineeName && DB.progressLocks && DB.progressLocks[progressKey(st.id, traineeName)]);
-  const canCheck = !!(traineeName && user && user.role==='trainee' && user.name===traineeName) && !isLocked;
+  const canCheck = !!(traineeName && user && isTraineeRole(user.role) && user.name===traineeName) && !isLocked;
 
   const stationOptions = ['weekday','sat','sun'].map(dt=>{
     const opts = DB.stations.filter(s=>(s.dayType||'weekday')===dt).map(s=>`<option value="${s.id}" ${s.id===st.id?'selected':''}>${s.emoji} ${s.name}（${s.code}）</option>`).join('');
@@ -3382,7 +3383,7 @@ function renderStationFlow(st, c, traineeName, canCheck){
 }
 async function toggleFlowStep(stationId, stepId, traineeName){
   const user = currentUser();
-  if(!(traineeName && user && user.role==='trainee' && user.name===traineeName)){ showToast('只有學員本人登入後才能勾選'); return; }
+  if(!(traineeName && user && isTraineeRole(user.role) && user.name===traineeName)){ showToast('只有學員本人登入後才能勾選'); return; }
   if(!DB.flowProgress) DB.flowProgress = {};
   const key = progressKey(stationId, traineeName);
   const arr = (DB.flowProgress[key]||[]).slice();
@@ -3757,7 +3758,7 @@ async function openStation(id, traineeName, dateStr){
   S.stationId=id;
   S.stationViewDate = dateStr || todayStr();
   const user = currentUser();
-  if(user && user.role==='trainee'){
+  if(user && isTraineeRole(user.role)){
     // 學員本人永遠只綁定自己的進度，不受任何傳入參數影響
     S.progressTraineeName = user.name;
   }else if(traineeName){
@@ -5144,14 +5145,15 @@ async function removeItemAttachment(stId, catId, itemId, attId){
    ADMIN — 學員與班表比對（員編登入 / 原始班表 / 代碼對照）
    ========================================================= */
 function renderAdminPeople(){
-  const roleLabel = {trainee:'學員', staff:'藥師', clerk:'書記'};
-  const roleTag = {trainee:'tag-sky', staff:'tag-mint', clerk:'tag-peach'};
+  const roleLabel = {trainee:'學員', intern:'實習生', staff:'藥師', clerk:'書記'};
+  const roleTag = {trainee:'tag-sky', intern:'tag-lilac', staff:'tag-mint', clerk:'tag-peach'};
   const empRows = DB.employees.map(e=>`
     <div class="admin-item-row">
       <div class="t"><b>${e.empNo}</b> · ${e.name}</div>
       <select onchange="updateEmployeeRole('${e.id}', this.value)" style="font-size:12px;border:1px solid var(--line);border-radius:100px;padding:4px 8px;background:#fff;">
         <option value="staff" ${e.role==='staff'?'selected':''}>藥師</option>
         <option value="trainee" ${e.role==='trainee'?'selected':''}>學員</option>
+        <option value="intern" ${e.role==='intern'?'selected':''}>實習生</option>
         <option value="clerk" ${e.role==='clerk'?'selected':''}>書記</option>
       </select>
       <button class="mini-x" onclick="deleteEmployee('${e.id}')">✕</button>
@@ -5173,7 +5175,7 @@ function renderAdminPeople(){
       <div class="form-group"><label>員工編號</label><input type="text" id="new-emp-no"></div>
       <div class="form-group"><label>姓名</label><input type="text" id="new-emp-name"></div>
       <div class="form-group"><label>身份</label>
-        <select id="new-emp-role"><option value="staff">藥師</option><option value="trainee">學員</option><option value="clerk">書記</option></select>
+        <select id="new-emp-role"><option value="staff">藥師</option><option value="trainee">學員</option><option value="intern">實習生</option><option value="clerk">書記</option></select>
       </div>
       <button class="btn btn-primary btn-block" onclick="addEmployee()">新增人員</button>
     </div>
@@ -5337,7 +5339,7 @@ function setHistoryTraineeFilter(name){
   else { S.historyData = null; renderApp(); }
 }
 function renderAdminHistory(){
-  const trainees = DB.employees.filter(e=>e.role==='trainee');
+  const trainees = DB.employees.filter(e=>isTraineeRole(e.role));
   const traineeOptions = trainees.map(e=>`<option value="${escAttr(e.name)}" ${e.name===S.historyTraineeFilter?'selected':''}>${e.name}</option>`).join('');
 
   if(!trainees.length){
@@ -5440,7 +5442,7 @@ async function addEmployee(){
 async function updateEmployeeRole(id, role){
   const e = DB.employees.find(x=>x.id===id);
   if(!e) return;
-  const roleZh = {trainee:'學員', staff:'藥師', clerk:'書記'};
+  const roleZh = {trainee:'學員', intern:'實習生', staff:'藥師', clerk:'書記'};
   if(!confirm(`確定要把「${e.name}」的身份從「${roleZh[e.role]||e.role}」改為「${roleZh[role]||role}」嗎？\n\n身份會影響今日班表的自動配對。`)){ renderApp(); return; }
   e.role = role;
   await persist(); renderApp();
@@ -5513,6 +5515,7 @@ function checkAdminPassword(){
 /* =========================================================
    登入畫面
    ========================================================= */
+const isTraineeRole = r => r==='trainee' || r==='intern';
 let loginError = '';
 // 先顯示登入畫面、資料庫在背景讀取：dbReady 表示主資料庫已讀完；dbReadyPromise 讓「已按登入但還沒讀完」的人可以等
 let dbReady = false;
