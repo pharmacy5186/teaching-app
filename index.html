@@ -472,6 +472,8 @@ function initFirebase(){
     // 直接指定長輪詢（不再自動偵測）：手機行動網路、院內代理網路上，預設的 WebChannel 連線常常卡住不動
     try{ firestoreDb.settings({ experimentalForceLongPolling:true, merge:true }); }catch(e){ console.warn('Firestore settings 略過', e); }
     firebaseReady = true;
+    // 背景預先建立連線：第一次連線可能要等很久，先在背景連好，後台存檔時就不用再等
+    try{ setTimeout(()=>{ firestoreDb.collection(FIRESTORE_DOC_PATH[0]).doc(FIRESTORE_DOC_PATH[1]).get({source:'server'}).catch(()=>{}); }, 0); }catch(e){}
     return true;
   }catch(e){
     console.error('Firebase 初始化失敗', e);
@@ -2785,13 +2787,36 @@ function mergeValues(base, local, remote){
 function merge3(base, local, remote){ return mergeValues(base, local, remote); }
 
 let __persistChain = Promise.resolve();
+let __pendingSaves = 0, __saveHideTmr = null;
+function setSaveBadge(text, kind){
+  try{
+    let el = document.getElementById('save-badge');
+    if(!el){
+      el = document.createElement('div'); el.id = 'save-badge';
+      el.style.cssText = 'position:fixed;right:12px;bottom:76px;z-index:9999;padding:6px 12px;border-radius:100px;font-size:12px;box-shadow:0 2px 8px rgba(0,0,0,.18);transition:opacity .3s;';
+      document.body.appendChild(el);
+    }
+    el.textContent = text; el.style.opacity = '1';
+    el.style.background = kind==='err' ? '#fbe3e1' : kind==='ok' ? '#e3f2ec' : '#fff3d6';
+    el.style.color = kind==='err' ? '#a12b22' : kind==='ok' ? '#17493f' : '#6b4a00';
+    clearTimeout(__saveHideTmr);
+    if(kind!=='busy') __saveHideTmr = setTimeout(()=>{ el.style.opacity = '0'; }, 2000);
+  }catch(e){}
+}
 function persist(opts){
   // 所有儲存排隊依序執行，避免同一個裝置自己連按多次互相打架
-  __persistChain = __persistChain.then(()=>persistOnce(opts || {}), ()=>persistOnce(opts || {}));
+  __pendingSaves++; setSaveBadge('儲存中…', 'busy');
+  const run = ()=>persistOnce(opts || {}).finally(()=>{
+    __pendingSaves--;
+    if(__pendingSaves <= 0){ __pendingSaves = 0; setSaveBadge(__lastSaveFailed ? '儲存失敗，請稍後再試' : '已儲存', __lastSaveFailed ? 'err' : 'ok'); }
+  });
+  __persistChain = __persistChain.then(run, run);
   return __persistChain;
 }
+let __lastSaveFailed = false;
 async function persistOnce(opts){
   if(!firebaseReady){ firebaseConfigMissing = true; return; }
+  __lastSaveFailed = false;
   try{
     const ref = firestoreDb.collection(FIRESTORE_DOC_PATH[0]).doc(FIRESTORE_DOC_PATH[1]);
     if(opts.overwrite){
@@ -2823,6 +2848,7 @@ async function persistOnce(opts){
     }
   }catch(e){
     console.error('Firestore 寫入失敗', e);
+    __lastSaveFailed = true;
     showToast('儲存失敗，請檢查網路連線或 Firebase 設定');
   }
 }
@@ -2954,7 +2980,7 @@ async function toggleItem(stationId, itemId, traineeName){
     }
   }
 
-  await persist();
+  persist();
   renderApp();
   const stAfter = findStation(stationId);
   if(stAfter && DB.progressLocks && DB.progressLocks[key]){
@@ -2966,7 +2992,7 @@ async function unlockStationProgress(stationId, traineeName){
   const key = progressKey(stationId, traineeName);
   if(!DB.progressLocks) DB.progressLocks = {};
   DB.progressLocks[key] = false;
-  await persist();
+  persist();
   renderApp();
   showToast('已解鎖');
 }
@@ -3390,7 +3416,7 @@ async function toggleFlowStep(stationId, stepId, traineeName){
   const i = arr.indexOf(stepId);
   if(i>-1) arr.splice(i,1); else arr.push(stepId);
   DB.flowProgress[key] = arr;
-  await persist();
+  persist();
   renderApp();
 }
 async function openFlowStepModal(stId, gId, xId){
@@ -3451,30 +3477,30 @@ async function addFlowGroup(stId){
   const name = prompt('時段名稱', '');
   if(name === null) return;
   st.flow.push({id:uid('fg'), title:name.trim() || '新時段', steps:[]});
-  await persist(); renderApp();
+  persist(); renderApp();
 }
 async function renameFlowGroup(stId, gId){
   const {g} = flowFind(stId, gId); if(!g) return;
   const name = prompt('時段名稱', g.title);
   if(name === null || !name.trim()) return;
-  g.title = name.trim(); await persist(); renderApp();
+  g.title = name.trim(); persist(); renderApp();
 }
 async function deleteFlowGroup(stId, gId){
   const {st, g} = flowFind(stId, gId); if(!g) return;
   if(!confirm(`確定要刪除時段「${g.title}」與底下的 ${g.steps.length} 個步驟嗎？`)) return;
   st.flow = st.flow.filter(x=>x.id!==gId);
-  await persist(); renderApp();
+  persist(); renderApp();
   g.steps.forEach(x=>(x.attachments||[]).forEach(a=>deleteAttachmentAndPages(a)));
 }
 async function moveFlowGroup(stId, gId, dir){
   const {st} = flowFind(stId, gId); if(!st) return;
-  flowMove(st.flow, gId, dir); await persist(); renderApp();
+  flowMove(st.flow, gId, dir); persist(); renderApp();
 }
 async function addFlowStep(stId, gId){
   const {g} = flowFind(stId, gId); if(!g) return;
   const x = {id:uid('fs'), text:'新步驟', detail:'', important:false, image:'', attachments:[]};
   g.steps.push(x);
-  await persist();
+  persist();
   renderApp();
   editFlowStep(stId, gId, x.id);
 }
@@ -3482,12 +3508,12 @@ async function deleteFlowStep(stId, gId, xId){
   const {g, x} = flowFind(stId, gId, xId); if(!x) return;
   if(!confirm(`確定要刪除步驟「${x.text}」嗎？`)) return;
   g.steps = g.steps.filter(s=>s.id!==xId);
-  await persist(); renderApp();
+  persist(); renderApp();
   (x.attachments||[]).forEach(a=>deleteAttachmentAndPages(a));
 }
 async function moveFlowStep(stId, gId, xId, dir){
   const {g} = flowFind(stId, gId); if(!g) return;
-  flowMove(g.steps, xId, dir); await persist(); renderApp();
+  flowMove(g.steps, xId, dir); persist(); renderApp();
 }
 function editFlowStep(stId, gId, xId){
   const {x} = flowFind(stId, gId, xId); if(!x) return;
@@ -3518,7 +3544,7 @@ function applyFlowModalFields(x){
 async function saveFlowStep(stId, gId, xId){
   const {x} = flowFind(stId, gId, xId); if(!x) return;
   applyFlowModalFields(x);
-  await persist(); closeModal(); renderApp(); showToast('已儲存步驟');
+  persist(); closeModal(); renderApp(); showToast('已儲存步驟');
 }
 async function uploadFlowAttachments(stId, gId, xId){
   const {x} = flowFind(stId, gId, xId); if(!x) return;
@@ -3534,7 +3560,7 @@ async function uploadFlowAttachments(stId, gId, xId){
     catch(e){ console.error(e); errors.push(`${file.name} 上傳失敗：${e.message||e}`); }
   }
   x.attachments = (x.attachments||[]).concat(newAtts);
-  await persist();
+  persist();
   editFlowStep(stId, gId, xId);
   setUploadStatus('fs-att-status', errors.length
     ? `<p style="color:var(--danger);font-size:11.5px;">已上傳 ${newAtts.length} 個檔案；失敗：${errors.join('；')}</p>`
@@ -3646,13 +3672,13 @@ async function addPPTab(){
   const t = {id:uid('ppt'), title:name.trim() || '新分頁', items:[]};
   DB.ppTabs.push(t);
   S.adminPPTab = t.id;
-  await persist(); renderApp();
+  persist(); renderApp();
 }
 async function renamePPTab(tabId){
   const {tab} = ppFind(tabId); if(!tab) return;
   const name = prompt('分頁名稱', tab.title);
   if(name === null || !name.trim()) return;
-  tab.title = name.trim(); await persist(); renderApp();
+  tab.title = name.trim(); persist(); renderApp();
 }
 async function deletePPTab(tabId){
   const {tab} = ppFind(tabId); if(!tab) return;
@@ -3660,29 +3686,29 @@ async function deletePPTab(tabId){
   DB.ppTabs = DB.ppTabs.filter(t=>t.id!==tabId);
   if(S.adminPPTab === tabId) S.adminPPTab = null;
   if(S.ppTab === tabId) S.ppTab = null;
-  await persist(); renderApp();
+  persist(); renderApp();
   tab.items.forEach(x=>(x.attachments||[]).forEach(a=>deleteAttachmentAndPages(a)));
 }
 async function movePPTab(tabId, dir){
-  ppMove(DB.ppTabs, tabId, dir); await persist(); renderApp();
+  ppMove(DB.ppTabs, tabId, dir); persist(); renderApp();
 }
 async function addPPItem(tabId){
   const {tab} = ppFind(tabId); if(!tab) return;
   const x = {id:uid('pp'), title:'新條目', detail:'', image:'', attachments:[]};
   tab.items.push(x);
-  await persist(); renderApp();
+  persist(); renderApp();
   editPPItem(tabId, x.id);
 }
 async function deletePPItem(tabId, itemId){
   const {tab, item} = ppFind(tabId, itemId); if(!item) return;
   if(!confirm(`確定要刪除條目「${item.title}」嗎？`)) return;
   tab.items = tab.items.filter(x=>x.id!==itemId);
-  await persist(); renderApp();
+  persist(); renderApp();
   (item.attachments||[]).forEach(a=>deleteAttachmentAndPages(a));
 }
 async function movePPItem(tabId, itemId, dir){
   const {tab} = ppFind(tabId); if(!tab) return;
-  ppMove(tab.items, itemId, dir); await persist(); renderApp();
+  ppMove(tab.items, itemId, dir); persist(); renderApp();
 }
 function editPPItem(tabId, itemId){
   const {item:x} = ppFind(tabId, itemId); if(!x) return;
@@ -3711,7 +3737,7 @@ function applyPPModalFields(x){
 async function savePPItem(tabId, itemId){
   const {item:x} = ppFind(tabId, itemId); if(!x) return;
   applyPPModalFields(x);
-  await persist(); closeModal(); renderApp(); showToast('已儲存條目');
+  persist(); closeModal(); renderApp(); showToast('已儲存條目');
 }
 async function uploadPPAttachments(tabId, itemId){
   const {item:x} = ppFind(tabId, itemId); if(!x) return;
@@ -3727,7 +3753,7 @@ async function uploadPPAttachments(tabId, itemId){
     catch(e){ console.error(e); errors.push(`${file.name} 上傳失敗：${e.message||e}`); }
   }
   x.attachments = (x.attachments||[]).concat(newAtts);
-  await persist();
+  persist();
   editPPItem(tabId, itemId);
   setUploadStatus('pp-att-status', errors.length
     ? `<p style="color:var(--danger);font-size:11.5px;">已上傳 ${newAtts.length} 個檔案；失敗：${errors.join('；')}</p>`
@@ -3748,7 +3774,7 @@ async function resetStationProgress(stationId, traineeName){
   if(!confirm(`確定要清空「${traineeName}」在這個站別的檢核進度嗎？此動作無法復原（歷史紀錄不受影響）。`)) return;
   delete DB.progress[progressKey(stationId, traineeName)];
   if(DB.progressLocks) delete DB.progressLocks[progressKey(stationId, traineeName)];
-  await persist();
+  persist();
   renderApp();
   showToast('已重置該學員的檢核進度');
 }
@@ -4165,7 +4191,7 @@ async function onQuizFileChange(input){
       if(existingIdx>-1){ DB.quizBank[existingIdx]=record; updated++; }
       else { DB.quizBank.push(record); added++; }
     }
-    await persist();
+    persist();
     showToast(`匯入完成：新增 ${added} 題、更新 ${updated} 題（其中 ${answeredFromExcel} 題已從 Excel 帶入答案）`);
   }catch(e){
     console.error('題庫匯入失敗', e);
@@ -4237,7 +4263,7 @@ async function deleteQuizQuestion(qId){
   const q = DB.quizBank[idx];
   const imgIds = [q.questionImage, ...(q.optionImages?Object.values(q.optionImages):[])].filter(Boolean);
   DB.quizBank.splice(idx,1);
-  await persist();
+  persist();
   renderApp();
   imgIds.forEach(id=>deleteAttachmentDoc(id).catch(()=>{}));
 }
@@ -4251,7 +4277,7 @@ async function clearAllQuizQuestions(){
     if(q.optionImages) Object.values(q.optionImages).forEach(v=>{ if(v) imgIds.push(v); });
   });
   DB.quizBank = [];
-  await persist();
+  persist();
   renderApp();
   showToast(`已清空全部題庫（共 ${bank.length} 題）`);
   // 圖片附件在背景逐一刪除，失敗不影響題庫已清空
@@ -4655,7 +4681,7 @@ async function deleteStation(id){
   const label = target ? `「${target.name}（${target.code}）」` : '這個站別';
   if(!confirm(`確定要刪除站別${label}嗎？\n\n站別內的檢核表、教學重點、工作流程都會一併移除。\n（若不小心刪錯，可到「資料備份」使用「還原單一站別」救回。）`)) return;
   DB.stations = DB.stations.filter(s=>s.id!==id);
-  await persist();
+  persist();
   renderApp();
   showToast('已刪除站別');
 }
@@ -4749,20 +4775,20 @@ function renderStationEditor(stationId){
 }
 
 async function updateStationField(stId, field, val){
-  const st = findStation(stId); st[field]=val; await persist(); renderApp();
+  const st = findStation(stId); st[field]=val; persist(); renderApp();
 }
 
 async function addTeachingPoint(stId){
   const st = findStation(stId);
   st.teachingPoints.push({id:uid('tp'), title:'新教學重點', bullets:['說明重點一'], image:''});
-  await persist(); renderApp();
+  persist(); renderApp();
 }
 async function deleteTeachingPoint(stId, tpId){
   const st = findStation(stId);
   const tpTarget = st.teachingPoints.find(t=>t.id===tpId);
   if(!confirm(`確定要刪除教學重點「${tpTarget?tpTarget.title:''}」嗎？此動作無法復原。`)) return;
   st.teachingPoints = st.teachingPoints.filter(t=>t.id!==tpId);
-  await persist(); renderApp();
+  persist(); renderApp();
 }
 function editTeachingPoint(stId, tpId){
   const st = findStation(stId);
@@ -4796,7 +4822,7 @@ async function saveTeachingPoint(stId, tpId){
   tp.title = f.title || tp.title;
   tp.bullets = f.bullets;
   tp.image = f.image;
-  await persist(); closeModal(); showToast('已儲存教學重點');
+  persist(); closeModal(); showToast('已儲存教學重點');
 }
 function setUploadStatus(elId, html){
   const el = document.getElementById(elId);
@@ -4819,7 +4845,7 @@ async function uploadTpAttachments(stId, tpId){
     catch(e){ console.error(e); errors.push(`${file.name} 上傳失敗：${e.message||e}`); }
   }
   tp.attachments = (tp.attachments||[]).concat(newAtts);
-  await persist();
+  persist();
   editTeachingPoint(stId, tpId);
   const summary = errors.length
     ? `<p style="color:var(--danger);font-size:11.5px;">已上傳 ${newAtts.length} 個檔案；失敗：${errors.join('；')}</p>`
@@ -4853,7 +4879,7 @@ async function addCategory(stId){
   const newCat = {id:uid('c'), title:'新分類', items:[]};
   if(incidentIdx>-1) st.categories.splice(incidentIdx, 0, newCat);
   else st.categories.push(newCat);
-  await persist(); renderApp();
+  persist(); renderApp();
 }
 async function moveCategory(stId, catId, direction){
   const st = findStation(stId);
@@ -4864,7 +4890,7 @@ async function moveCategory(stId, catId, direction){
   if(idx<0 || newIdx<0 || newIdx>=normal.length) return;
   const tmp = normal[idx]; normal[idx] = normal[newIdx]; normal[newIdx] = tmp;
   st.categories = normal.concat(incident);
-  await persist(); renderApp();
+  persist(); renderApp();
 }
 async function moveItem(stId, catId, itemId, direction){
   const st = findStation(stId);
@@ -4873,7 +4899,7 @@ async function moveItem(stId, catId, itemId, direction){
   const newIdx = idx + direction;
   if(idx<0 || newIdx<0 || newIdx>=cat.items.length) return;
   const tmp = cat.items[idx]; cat.items[idx] = cat.items[newIdx]; cat.items[newIdx] = tmp;
-  await persist(); renderApp();
+  persist(); renderApp();
 }
 function renameCategory(stId, catId){
   const st = findStation(stId);
@@ -4887,13 +4913,13 @@ async function deleteCategory(stId, catId){
   if(cat && cat.isIncident){ showToast('異常事件記錄分類無法刪除'); return; }
   if(!confirm(`確定要刪除檢核分類「${cat?cat.title:''}」嗎？\n\n底下的 ${cat?cat.items.length:0} 個檢核項目會一併刪除，此動作無法復原。`)) return;
   st.categories = st.categories.filter(c=>c.id!==catId);
-  await persist(); renderApp();
+  persist(); renderApp();
 }
 async function addItem(stId, catId){
   const st = findStation(stId);
   const cat = st.categories.find(c=>c.id===catId);
   cat.items.push({id:uid('i'), text:'新檢核項目', important:false, detail:null});
-  await persist(); renderApp();
+  persist(); renderApp();
 }
 async function deleteItem(stId, catId, itemId){
   const st = findStation(stId);
@@ -4901,7 +4927,7 @@ async function deleteItem(stId, catId, itemId){
   const delTarget = cat.items.find(i=>i.id===itemId);
   if(!confirm(`確定要刪除「${delTarget?delTarget.text:''}」嗎？此動作無法復原。`)) return;
   cat.items = cat.items.filter(i=>i.id!==itemId);
-  await persist(); renderApp();
+  persist(); renderApp();
 }
 function migrateDetailToSections(d){
   if(!d) return [];
@@ -5030,21 +5056,21 @@ async function moveTpAttachment(stId, tpId, attId, dir){
   const f = captureTpModalFields();
   tp.title = f.title || tp.title; tp.bullets = f.bullets; tp.image = f.image;
   if(!moveAttInArray(tp.attachments||[], attId, dir)) return;
-  await persist();
+  persist();
   editTeachingPoint(stId, tpId);
 }
 async function moveFlowAttachment(stId, gId, xId, attId, dir){
   const {x} = flowFind(stId, gId, xId); if(!x) return;
   applyFlowModalFields(x);
   if(!moveAttInArray(x.attachments||[], attId, dir)) return;
-  await persist();
+  persist();
   editFlowStep(stId, gId, xId);
 }
 async function movePPAttachment(tabId, itemId, attId, dir){
   const {item:x} = ppFind(tabId, itemId); if(!x) return;
   applyPPModalFields(x);
   if(!moveAttInArray(x.attachments||[], attId, dir)) return;
-  await persist();
+  persist();
   editPPItem(tabId, itemId);
 }
 async function moveItemAttachment(stId, catId, itemId, attId, dir){
@@ -5096,7 +5122,7 @@ async function saveItem(stId, catId, itemId){
   }else{
     item.detail = null;
   }
-  await persist(); closeModal(); showToast('已儲存檢核項目');
+  persist(); closeModal(); showToast('已儲存檢核項目');
 }
 async function uploadItemAttachments(stId, catId, itemId){
   const input = document.getElementById('item-att-input');
@@ -5202,7 +5228,7 @@ async function updateAdminPassword(){
   if(!val){ showToast('請輸入新密碼'); return; }
   if(!confirm('確定要更新後台管理密碼嗎？更新後立即生效，舊密碼將失效。')) return;
   DB.adminPassword = val;
-  await persist();
+  persist();
   showToast('後台密碼已更新');
   document.getElementById('new-admin-pw').value = '';
 }
@@ -5437,7 +5463,7 @@ async function addEmployee(){
   if(!empNo || !name){ showToast('請填寫員編與姓名'); return; }
   if(findEmployeeByEmpNo(empNo)){ showToast('此員編已存在'); return; }
   DB.employees.push({id:uid('emp'), empNo, name, role});
-  await persist(); renderApp(); showToast('已新增人員');
+  persist(); renderApp(); showToast('已新增人員');
 }
 async function updateEmployeeRole(id, role){
   const e = DB.employees.find(x=>x.id===id);
@@ -5445,27 +5471,27 @@ async function updateEmployeeRole(id, role){
   const roleZh = {trainee:'學員', intern:'實習生', staff:'藥師', clerk:'書記'};
   if(!confirm(`確定要把「${e.name}」的身份從「${roleZh[e.role]||e.role}」改為「${roleZh[role]||role}」嗎？\n\n身份會影響今日班表的自動配對。`)){ renderApp(); return; }
   e.role = role;
-  await persist(); renderApp();
+  persist(); renderApp();
 }
 async function deleteEmployee(id){
   const empTarget = DB.employees.find(e=>e.id===id);
   if(!confirm(`確定要刪除人員「${empTarget?empTarget.empNo+' '+empTarget.name:''}」嗎？此動作無法復原。`)) return;
   DB.employees = DB.employees.filter(e=>e.id!==id);
   if(sessionUserId===id) sessionUserId=null;
-  await persist(); renderApp();
+  persist(); renderApp();
 }
 async function addCodeMap(){
   const code = document.getElementById('new-code-text').value.trim();
   const stationId = document.getElementById('new-code-station').value;
   if(!code){ showToast('請輸入班表代碼'); return; }
   DB.codeMap.push({id:uid('cm'), code, stationId});
-  await persist(); renderApp(); showToast('已新增對照');
+  persist(); renderApp(); showToast('已新增對照');
 }
 async function deleteCodeMap(id){
   const cmTarget = DB.codeMap.find(c=>c.id===id);
   if(!confirm(`確定要刪除班別代碼對照「${cmTarget?cmTarget.code:''}」嗎？此動作無法復原。`)) return;
   DB.codeMap = DB.codeMap.filter(c=>c.id!==id);
-  await persist(); renderApp();
+  persist(); renderApp();
 }
 
 
