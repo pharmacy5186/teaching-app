@@ -660,13 +660,23 @@ async function saveAttachmentDoc(id, data){
   if(!firebaseReady) throw new Error('Firebase 尚未設定完成，無法儲存檔案');
   await firestoreDb.collection(ATTACHMENTS_COLLECTION).doc(id).set(data);
 }
+// 附件快取：同一次開啟 App 期間，讀過的圖片／PDF 頁面不用再從雲端重讀
+const __attachmentCache = new Map();
 async function loadAttachmentDoc(id){
   if(!firebaseReady) return null;
-  const doc = await firestoreDb.collection(ATTACHMENTS_COLLECTION).doc(id).get();
-  return doc.exists ? doc.data() : null;
+  if(__attachmentCache.has(id)) return __attachmentCache.get(id);
+  const p = firestoreDb.collection(ATTACHMENTS_COLLECTION).doc(id).get()
+    .then(doc=>{
+      if(!doc.exists){ __attachmentCache.delete(id); return null; }
+      return doc.data();
+    })
+    .catch(e=>{ __attachmentCache.delete(id); throw e; });
+  __attachmentCache.set(id, p);
+  return p;
 }
 async function deleteAttachmentDoc(id){
   if(!firebaseReady) return;
+  __attachmentCache.delete(id);
   try{ await firestoreDb.collection(ATTACHMENTS_COLLECTION).doc(id).delete(); }
   catch(e){ console.error('刪除附件文件失敗', e); }
 }
@@ -3049,8 +3059,31 @@ function blisterRow(pct){
 function initials(name){ return name ? name[0] : '?'; }
 
 let modalHtml = '';
-function openModal(html){ modalHtml = html; renderApp(); }
-function closeModal(){ modalHtml=''; renderApp(); }
+let modalLight = false;
+function openModal(html){ modalLight = false; modalHtml = html; renderApp(); }
+// 輕量彈窗：只更新彈窗本身，不重畫整個 App（用於圖文教學這類會連續更新兩次的彈窗）
+function openModalLight(html){
+  modalHtml = html;
+  const app = document.getElementById('app');
+  const box = app && app.querySelector('.modal-overlay .modal-box');
+  if(box){ box.innerHTML = html; modalLight = true; return; }
+  if(!app){ renderApp(); return; }
+  const ov = document.createElement('div');
+  ov.className = 'modal-overlay';
+  ov.setAttribute('onclick','if(event.target===this)closeModal()');
+  ov.innerHTML = '<div class="modal-box">'+html+'</div>';
+  app.appendChild(ov);
+  modalLight = true;
+}
+function closeModal(){
+  modalHtml='';
+  if(modalLight){
+    modalLight = false;
+    const ov = document.querySelector('#app .modal-overlay');
+    if(ov){ ov.remove(); return; }
+  }
+  renderApp();
+}
 
 let toastMsg = '';
 function showToast(msg){
@@ -3843,7 +3876,7 @@ async function openItemModal(stationId, itemId){
   logViewEvent(isIncidentItem ? 'incident' : 'item', stationId, itemId);
   const d = item.detail;
   const sections = migrateDetailToSections(d);
-  openModal(`
+  openModalLight(`
     <div class="modal-top">
       <h4>${item.text}</h4>
       <button class="modal-close" onclick="closeModal()">✕</button>
@@ -3856,7 +3889,7 @@ async function openItemModal(stationId, itemId){
     ${await renderViewerAttachmentsAsync(s.attachments)}
   `))).join('');
   const itemAttHtml = await renderViewerAttachmentsAsync(d.attachments);
-  openModal(`
+  openModalLight(`
     <div class="modal-top">
       <h4>${item.text}</h4>
       <button class="modal-close" onclick="closeModal()">✕</button>
@@ -3871,7 +3904,7 @@ async function openImageModal(tpId, stationId){
   const st = findStation(stationId);
   const tp = st.teachingPoints.find(t=>t.id===tpId);
   if(!tp) return;
-  openModal(`
+  openModalLight(`
     <div class="modal-top">
       <h4>${tp.title}</h4>
       <button class="modal-close" onclick="closeModal()">✕</button>
@@ -3879,7 +3912,7 @@ async function openImageModal(tpId, stationId){
     <p style="font-size:12px;color:var(--ink-soft);text-align:center;padding:16px 0;">載入中…</p>
   `);
   const attHtml = await renderViewerAttachmentsAsync(tp.attachments);
-  openModal(`
+  openModalLight(`
     <div class="modal-top">
       <h4>${tp.title}</h4>
       <button class="modal-close" onclick="closeModal()">✕</button>
