@@ -6,6 +6,10 @@
 <title>站別教學指引 · On-the-spot Teaching</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<!-- 提早跟 Firebase 相關的伺服器建立連線，省掉程式庫下載與資料庫讀取時的握手時間 -->
+<link rel="preconnect" href="https://www.gstatic.com" crossorigin>
+<link rel="preconnect" href="https://firestore.googleapis.com" crossorigin>
+<link rel="preconnect" href="https://identitytoolkit.googleapis.com" crossorigin>
 <!-- 字型改成「非阻塞載入」：就算 fonts.googleapis.com 很慢或被擋，也不會卡住整個畫面，字型載好後才自動套用 -->
 <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+TC:wght@700&family=Noto+Sans+TC:wght@400;700&family=IBM+Plex+Mono:wght@500&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
 <noscript><link href="https://fonts.googleapis.com/css2?family=Noto+Serif+TC:wght@700&family=Noto+Sans+TC:wght@400;700&family=IBM+Plex+Mono:wght@500&display=swap" rel="stylesheet"></noscript>
@@ -2785,7 +2789,7 @@ function findStation(id){ return DB.stations.find(s=>s.id===id); }
 /* =========================================================
    員編登入 / 學員自動配對邏輯
    ========================================================= */
-function findEmployeeByEmpNo(empNo){ return DB.employees.find(e=>e.empNo===String(empNo).trim()); }
+function findEmployeeByEmpNo(empNo){ return ((DB && DB.employees) || []).find(e=>e.empNo===String(empNo).trim()); }
 function findEmployeeByName(name){ return DB.employees.find(e=>e.name===String(name).trim()); }
 // 登入狀態只存在這次瀏覽器記憶體裡（sessionUserId），不寫進 Firestore，
 // 所以重新整理頁面或關掉分頁後，一定要重新輸入員編登入。
@@ -5463,6 +5467,23 @@ function checkAdminPassword(){
    登入畫面
    ========================================================= */
 let loginError = '';
+// 先顯示登入畫面、資料庫在背景讀取：dbReady 表示主資料庫已讀完；dbReadyPromise 讓「已按登入但還沒讀完」的人可以等
+let dbReady = false;
+let __loginWaiting = false;
+let __resolveDbReady = null;
+const dbReadyPromise = new Promise(r=>{ __resolveDbReady = r; });
+// 載入時間（從開啟網頁算起的秒數），顯示在登入畫面底部，方便判斷慢在哪一步
+const __loadTiming = { lib:null, db:null };
+function loadTimingText(){
+  const f = v => (v/1000).toFixed(1)+' 秒';
+  const lib = __loadTiming.lib===null ? '載入中…' : f(__loadTiming.lib);
+  const db = __loadTiming.db===null ? '載入中…' : f(__loadTiming.db);
+  return '載入時間（從開啟網頁算起）：程式庫 '+lib+' ／ 資料庫 '+db;
+}
+function updateLoadTiming(){
+  const el = document.getElementById('login-timing');
+  if(el) el.textContent = loadTimingText();
+}
 function renderLogin(){
   return `
     <div class="view" style="padding-top:50px;">
@@ -5478,7 +5499,9 @@ function renderLogin(){
         <div class="login-name-box" id="login-name-preview">輸入員編後自動顯示</div>
 
         ${loginError ? `<p style="color:var(--danger);font-size:12px;margin:10px 0 0;">${loginError}</p>` : ''}
-        <button class="btn btn-primary btn-block" style="margin-top:20px;min-height:52px;font-size:15px;" onclick="doLogin()">登入系統</button>
+        <div id="login-db-status" style="font-size:12px;color:var(--ink-soft);margin-top:10px;display:${dbReady?'none':'block'};">資料庫連線中，可以先輸入員編…</div>
+        <button id="login-btn" class="btn btn-primary btn-block" style="margin-top:20px;min-height:52px;font-size:15px;" onclick="doLogin()">登入系統</button>
+        <div id="login-timing" style="margin-top:18px;font-size:10.5px;color:var(--ink-soft);text-align:center;opacity:.75;">${loadTimingText()}</div>
       </div>
     </div>`;
 }
@@ -5498,6 +5521,11 @@ function onLoginIdInput(){
     box.classList.remove('resolved','notfound');
     return;
   }
+  if(!dbReady){
+    box.textContent = '資料庫連線中…';
+    box.classList.remove('resolved','notfound');
+    return;
+  }
   const emp = lookupByDigits(digits);
   if(emp){
     box.textContent = emp.name;
@@ -5513,6 +5541,16 @@ async function doLogin(){
   const raw = (document.getElementById('login-empno').value||'').trim();
   const digits = raw.replace(/[^0-9]/g,'');
   if(!digits){ loginError='請輸入員編數字'; renderApp(); return; }
+  if(!dbReady){
+    // 資料庫還在背景讀取：按鈕顯示載入中，讀完後自動繼續登入，不需要重按
+    if(__loginWaiting) return;
+    __loginWaiting = true;
+    const btn = document.getElementById('login-btn');
+    if(btn){ btn.disabled = true; btn.textContent = '資料載入中，請稍候…'; }
+    await dbReadyPromise;
+    __loginWaiting = false;
+    if(dbLoadFailed || !DB) return; // 讀取失敗：init 已經顯示原本的鎖定畫面
+  }
   const padded = digits.padStart(5,'0');
   const candidate = 'Y'+padded;
   let emp = findEmployeeByEmpNo(candidate) || findEmployeeByEmpNo(raw) || findEmployeeByEmpNo(digits);
@@ -5667,8 +5705,27 @@ function showLoadingScreen(msg){
   }, 8000);
 }
 function updateLoadingMessage(msg){
-  const el = document.getElementById('loading-msg');
+  const el = document.getElementById('loading-msg') || document.getElementById('login-db-status');
   if(el) el.textContent = msg;
+}
+// 先把登入畫面畫出來（不需要資料庫），員編驗證等資料庫讀完再做
+function renderEarlyLogin(){
+  clearTimeout(__loadingHintTimer);
+  const app = document.getElementById('app');
+  if(!app) return;
+  app.innerHTML = `
+    <div class="shell">
+      <div class="topbar">
+        <div class="brand">
+          <div class="rx-mark">℞</div>
+          <div><h1>門診教學指引</h1><p>On-the-spot Teaching</p></div>
+        </div>
+        <div class="date-chip">${todayStr()}</div>
+      </div>
+      ${renderLogin()}
+    </div>`;
+  const i = document.getElementById('login-empno');
+  if(i) i.focus();
 }
 // 背景預抓班表：登入畫面停留的時候就先把今天和明天所屬月份的班表讀回來，登入後的「今日班表」就不用再多等一輪
 function prefetchScheduleInBackground(){
@@ -5686,11 +5743,13 @@ function whenDomReady(){
 }
 
 (async function init(){
-  showLoadingScreen('載入中...');
+  renderEarlyLogin(); // 一開始就畫出登入畫面，不等 Firebase 程式庫下載
   try{
     await whenDomReady();
+    __loadTiming.lib = performance.now(); updateLoadTiming();
     diagLog(`頁面與外部程式庫載入階段結束（firebase ${typeof firebase === 'undefined' ? '未載入' : '已載入'}）`);
     if(typeof firebase === 'undefined'){
+      if(__resolveDbReady) __resolveDbReady();
       showFatalError('Firebase 程式庫載入失敗', 'firebase-app-compat.js 等外部程式庫沒有成功載入，可能是網路連線問題，或瀏覽器/防火牆擋住了 gstatic.com。請檢查網路連線後重新整理頁面。');
       return;
     }
@@ -5700,11 +5759,23 @@ function whenDomReady(){
     clearTimeout(__loadingHintTimer);
     const dow = new Date().getDay();
     S.stationsTab = dow===6 ? 'sat' : (dow===0 ? 'sun' : 'weekday');
-    renderApp();
+    dbReady = true;
+    __loadTiming.db = performance.now(); updateLoadTiming();
+    __resolveDbReady();
+    // 如果使用者已經按了登入在等，由 doLogin 接手繼續（不重畫，避免洗掉畫面）；
+    // 讀取失敗時一律重畫，顯示原本的鎖定畫面
+    if(!__loginWaiting || dbLoadFailed){
+      const typedEl = document.getElementById('login-empno');
+      const typed = typedEl ? typedEl.value : '';
+      renderApp();
+      const again = document.getElementById('login-empno');
+      if(again && typed){ again.value = typed; onLoginIdInput(); again.focus(); }
+    }
     // 畫面已經出現後，才在背景把舊的學習／考核紀錄搬到獨立集合（只有第一次需要，不會拖慢開啟速度）
     migrateLegacyLogsToCollections();
   }catch(e){
     console.error('App 初始化失敗', e);
+    if(__resolveDbReady) __resolveDbReady();
     showFatalError('載入失敗', '錯誤訊息：' + (e && e.message ? e.message : String(e)));
   }
 })();
